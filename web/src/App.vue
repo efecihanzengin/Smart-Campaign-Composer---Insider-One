@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import CampaignComposer from './components/CampaignComposer.vue'
+import CampaignDashboard from './components/CampaignDashboard.vue'
 import { useOverviewStore } from './stores/overview'
 
 const store = useOverviewStore()
@@ -38,6 +39,7 @@ const recipientCount = computed(() =>
         <p v-else class="mt-1 text-slate-400">Yükleniyor…</p>
       </section>
       <CampaignComposer v-if="!store.failed" />
+      <CampaignDashboard v-if="!store.failed" />
     </main>
   </div>
 </template>

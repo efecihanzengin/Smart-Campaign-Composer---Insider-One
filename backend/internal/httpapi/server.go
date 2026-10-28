@@ -21,6 +21,9 @@ type Options struct {
 	Model   string
 	// LLM answers the Segment call; nil means the scripted mock.
 	LLM llm.LLM
+	// DashboardInterval is how often the dashboard stream re-reads the
+	// Delivery counts; zero means 500ms.
+	DashboardInterval time.Duration
 }
 
 type server struct {
@@ -33,11 +36,16 @@ func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
 	if opts.LLM == nil {
 		opts.LLM = llm.NewMock()
 	}
+	if opts.DashboardInterval <= 0 {
+		opts.DashboardInterval = 500 * time.Millisecond
+	}
 	s := &server{pool: pool, opts: opts}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
+	mux.HandleFunc("GET /api/campaigns/{id}", s.getCampaign)
+	mux.HandleFunc("GET /api/dashboard", s.dashboard)
 	mux.HandleFunc("POST /api/campaigns/{id}/content", s.generateContent)
 	mux.HandleFunc("PUT /api/campaigns/{id}/content/{channel}", s.updateContent)
 	mux.HandleFunc("POST /api/campaigns/{id}/content/{channel}/validate", s.validateContent)

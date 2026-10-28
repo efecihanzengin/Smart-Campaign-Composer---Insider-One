@@ -18,6 +18,7 @@ import (
 	"campaigncomposer/internal/db"
 	"campaigncomposer/internal/httpapi"
 	"campaigncomposer/internal/llm"
+	"campaigncomposer/internal/worker"
 )
 
 func main() {
@@ -77,15 +78,14 @@ func runAPI(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
-// runWorker connects to the database and waits; claiming and sending
-// Deliveries arrives with the sending slice.
+// runWorker claims and sends Deliveries until it is stopped. The api process
+// owns migrations, so the worker starts only once the api is healthy.
 func runWorker(ctx context.Context, cfg config.Config) error {
 	pool, err := db.Connect(ctx, cfg.DatabaseURL, 60*time.Second)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	log.Printf("worker ready (Provider at %s); no Deliveries to send yet", cfg.ProviderURL)
-	<-ctx.Done()
-	return nil
+	log.Printf("worker sending to the Provider at %s", cfg.ProviderURL)
+	return worker.New(pool, worker.Options{ProviderURL: cfg.ProviderURL}).Run(ctx)
 }

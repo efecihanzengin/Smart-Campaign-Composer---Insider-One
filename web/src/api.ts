@@ -261,3 +261,33 @@ export async function approveCampaign(id: number): Promise<Approval> {
   if (!res.ok) throw new ApiError(body?.error ?? `POST approve: ${res.status}`)
   return body
 }
+
+// ChannelCounts is a Channel's Deliveries by state; pending includes those in flight.
+export interface ChannelCounts {
+  pending: number
+  sent: number
+  failed: number
+  total: number
+}
+
+// CampaignProgress is one Campaign on the live dashboard.
+export interface CampaignProgress {
+  id: number
+  brief: string
+  status: string
+  deliveries: Partial<Record<Channel, ChannelCounts>>
+  // progress is the share of Deliveries with an outcome, from 0 to 1.
+  progress: number
+}
+
+export interface DashboardEvent {
+  campaigns: CampaignProgress[]
+}
+
+// subscribeDashboard opens the dashboard SSE stream and hands every event to
+// onEvent. EventSource reconnects on its own; the returned function closes it.
+export function subscribeDashboard(onEvent: (e: DashboardEvent) => void): () => void {
+  const source = new EventSource('/api/dashboard')
+  source.addEventListener('dashboard', (e) => onEvent(JSON.parse((e as MessageEvent).data)))
+  return () => source.close()
+}
