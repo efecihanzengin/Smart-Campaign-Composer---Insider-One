@@ -44,6 +44,7 @@ function mockApi(opts: Options = {}) {
     if (url === '/api/campaigns/7/approve' && init?.method === 'POST') {
       return opts.approve?.() ?? json({ id: 7, status: 'approved', deliveries: { sms: audience.sms, email: audience.email } })
     }
+    if (url === '/api/campaigns/7/cancel' && init?.method === 'POST') return json({ id: 7, status: 'cancelled' })
     const content = url.match(/^\/api\/campaigns\/7\/content\/(\w+)$/)
     if (content && init?.method === 'PUT') return json({ content: JSON.parse(String(init.body)), validation: valid })
     const channel = url.match(/^\/api\/campaigns\/7\/channels\/(\w+)$/)
@@ -214,5 +215,31 @@ describe('Approval', () => {
 
     expect(wrapper.get('[data-test="approve-error"]').text()).toContain('SMS kanalında izin vermiş alıcı yok')
     expect(wrapper.find('[data-test="approved"]').exists()).toBe(false)
+  })
+})
+
+describe('Cancelling a draft', () => {
+  it('cancels the draft, so it can no longer be edited or approved', async () => {
+    const api = mockApi()
+    const wrapper = await reviewed(api)
+
+    await wrapper.get('[data-test="cancel-draft"]').trigger('click')
+    await flushPromises()
+
+    expect(api.fetchMock.mock.calls.filter(([u, init]) => u === '/api/campaigns/7/cancel' && init?.method === 'POST')).toHaveLength(1)
+    expect(wrapper.get('[data-test="cancelled"]').text()).toContain('iptal edildi')
+    expect(wrapper.find('[data-test="approve"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="cancel-draft"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="sms-body"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('is not offered once the Campaign is approved', async () => {
+    const api = mockApi()
+    const wrapper = await reviewed(api)
+
+    await button(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cancel-draft"]').exists()).toBe(false)
   })
 })

@@ -1,8 +1,32 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { channels, subscribeDashboard, type CampaignProgress, type ChannelCounts } from '../api'
+import {
+  ApiError,
+  cancelCampaign,
+  cancellable,
+  channels,
+  subscribeDashboard,
+  type CampaignProgress,
+  type ChannelCounts,
+} from '../api'
 
 const campaigns = ref<CampaignProgress[]>([])
+const cancelling = ref<Record<number, boolean>>({})
+const cancelErrors = ref<Record<number, string>>({})
+
+// cancel stops the Campaign. The stream confirms the status on its next
+// event; until then the row shows it cancelled right away.
+async function cancel(c: CampaignProgress) {
+  cancelling.value[c.id] = true
+  delete cancelErrors.value[c.id]
+  try {
+    c.status = await cancelCampaign(c.id)
+  } catch (e) {
+    cancelErrors.value[c.id] = e instanceof ApiError ? e.message : 'Sunucuya ulaşılamadı. Lütfen tekrar deneyin.'
+  } finally {
+    delete cancelling.value[c.id]
+  }
+}
 let close: (() => void) | null = null
 
 onMounted(() => {
@@ -36,10 +60,25 @@ const sentOn = (c: CampaignProgress) =>
     >
       <div class="flex items-baseline justify-between gap-4">
         <p class="truncate text-sm text-slate-700" :title="c.brief">#{{ c.id }} · {{ c.brief }}</p>
-        <span class="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
-          {{ statusNames[c.status] ?? c.status }}
-        </span>
+        <div class="flex shrink-0 items-center gap-2">
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+            {{ statusNames[c.status] ?? c.status }}
+          </span>
+          <button
+            v-if="cancellable.includes(c.status)"
+            type="button"
+            data-test="cancel"
+            :disabled="cancelling[c.id]"
+            class="rounded-md border border-red-200 px-2 py-0.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-40"
+            @click="cancel(c)"
+          >
+            {{ cancelling[c.id] ? 'İptal ediliyor…' : 'İptal et' }}
+          </button>
+        </div>
       </div>
+      <p v-if="cancelErrors[c.id]" data-test="cancel-error" class="rounded-md bg-red-50 p-2 text-sm text-red-700">
+        {{ cancelErrors[c.id] }}
+      </p>
       <div class="flex items-center gap-3">
         <div
           data-test="progress"
