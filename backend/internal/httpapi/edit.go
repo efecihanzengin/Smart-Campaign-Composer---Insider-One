@@ -142,18 +142,19 @@ func (s *server) updateContent(w http.ResponseWriter, r *http.Request) {
 var errNoContent = errors.New("no Content to save")
 
 // upsertContent saves the one Channel's Content in p and leaves the other
-// Channel's alone. The draft check is part of the write, so a write racing
-// approval can't change Content that is already frozen: it affects no row.
+// Channel's alone. The draft check is repeated in the write, under a share
+// lock that waits for an approval holding the row, so a write racing approval
+// can't change Content that is already frozen: it affects no row.
 func (s *server) upsertContent(ctx context.Context, id int64, p content.Proposal) (any, pgconn.CommandTag, error) {
 	if sms := p.SMS; sms != nil {
 		tag, err := s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, body)
-			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft'
+			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft' FOR SHARE
 			ON CONFLICT (campaign_id, channel) DO UPDATE SET body = EXCLUDED.body, updated_at = now()`, id, sms.Body)
 		return sms, tag, err
 	}
 	if e := p.Email; e != nil {
 		tag, err := s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, subject, preheader, body, cta_text)
-			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft'
+			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft' FOR SHARE
 			ON CONFLICT (campaign_id, channel) DO UPDATE SET subject = EXCLUDED.subject, preheader = EXCLUDED.preheader,
 				body = EXCLUDED.body, cta_text = EXCLUDED.cta_text, updated_at = now()`,
 			id, e.Subject, e.Preheader, e.Body, e.CTAText)

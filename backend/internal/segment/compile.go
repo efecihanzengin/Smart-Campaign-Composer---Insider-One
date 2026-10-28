@@ -135,3 +135,33 @@ func CountAudience(ctx context.Context, q Querier, rule Node) (Audience, error) 
 		FROM recipients r WHERE `+where, args...).Scan(&a.SMS, &a.Email)
 	return a, err
 }
+
+// Member is one Recipient of an Audience, with what a Delivery to them needs.
+type Member struct {
+	ID                     int64
+	FirstName, City, Phone string
+	Email                  string
+}
+
+// consentColumn is the consent flag of each Channel (ADR-0004).
+var consentColumn = map[string]string{"sms": "r.sms_consent", "email": "r.email_consent"}
+
+// Members lists the rule's Audience on one Channel, consent applied, as it is
+// at this moment: approval freezes it from this.
+func Members(ctx context.Context, tx pgx.Tx, rule Node, channel string) ([]Member, error) {
+	consent, ok := consentColumn[channel]
+	if !ok {
+		return nil, fmt.Errorf("segment: unknown Channel %q", channel)
+	}
+	where, args := Compile(rule)
+	rows, err := tx.Query(ctx, `SELECT r.id, r.first_name, r.city, r.phone, r.email FROM recipients r
+		WHERE `+consent+` AND `+where+` ORDER BY r.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Member, error) {
+		var m Member
+		err := row.Scan(&m.ID, &m.FirstName, &m.City, &m.Phone, &m.Email)
+		return m, err
+	})
+}

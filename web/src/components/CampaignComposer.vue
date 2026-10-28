@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useCampaignStore } from '../stores/campaign'
+import ApprovalPanel from './ApprovalPanel.vue'
 import ContentReview from './ContentReview.vue'
 import RegenerateControl from './RegenerateControl.vue'
 
@@ -103,7 +104,7 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
         part="segment"
         placeholder="İsteğe bağlı talimat, ör. sadece Ankara"
         :busy="store.segmentRegenerating"
-        :disabled="store.busy"
+        :disabled="store.locked"
         @regenerate="store.regenerateSegment($event)"
       />
       <div
@@ -116,7 +117,7 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
           v-if="store.segmentRetryable"
           type="button"
           data-test="segment-retry"
-          :disabled="store.busy"
+          :disabled="store.locked"
           class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
           @click="store.retrySegment()"
         >
@@ -126,5 +127,6 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
     </section>
 
     <ContentReview v-if="store.campaign" />
+    <ApprovalPanel v-if="store.campaign" />
   </div>
 </template>

@@ -314,6 +314,29 @@ func TestSegmentRuleRegenerationThatCannotBeRepairedKeepsTheCurrentRule(t *testi
 	}
 }
 
+func TestASegmentRuleRegenerationThatEmptiesTheAudienceDisablesTheChannels(t *testing.T) {
+	nobody := `{"rule": {"all": [{"field": "city", "op": "eq", "value": "Hakkari"}]}, "unsupported_criteria": []}`
+	segments := &segmentScript{answers: []string{ankaraSegment, nobody}}
+	contents := &contentScript{answers: []string{bothChannels}}
+	srv := startAPI(t, httpapi.Options{LLM: &llm.Mock{SegmentFunc: segments.call, ContentFunc: contents.call}})
+	c := createCampaign(t, srv.URL, exampleBrief)
+	lastDone(t, streamContent(t, srv.URL, c.ID))
+
+	var got struct {
+		regeneratedSegment
+		DisabledChannels map[string]string `json:"disabled_channels"`
+	}
+	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece Hakkari"}, &got); code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", code)
+	}
+	if len(got.EnabledChannels) != 0 || got.DisabledChannels["sms"] == "" || got.DisabledChannels["email"] == "" {
+		t.Errorf("enabled %q, disabled %q; want both Channels off with an explanation", got.EnabledChannels, got.DisabledChannels)
+	}
+	if got.Content.SMS == nil || got.Content.Email == nil {
+		t.Errorf("Content = %+v, want it kept", got.Content)
+	}
+}
+
 func TestTheDefaultMockRegeneratesValidContentAndSegmentRules(t *testing.T) {
 	srv := startAPI(t, httpapi.Options{LLM: llm.NewMock()})
 	c := createCampaign(t, srv.URL, exampleBrief)

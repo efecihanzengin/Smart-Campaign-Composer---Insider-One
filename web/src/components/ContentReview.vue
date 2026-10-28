@@ -89,12 +89,20 @@ const fieldNames: Record<string, string> = {
           type="checkbox"
           :data-test="`channel-${c}`"
           :checked="enabled(c)"
-          :disabled="store.busy"
+          :disabled="store.locked || !!store.disabledChannels[c]"
           @change="toggle(c, $event)"
         />
         {{ channelNames[c] }}
       </label>
     </fieldset>
+    <p
+      v-for="(why, c) in store.disabledChannels"
+      :key="c"
+      :data-test="`channel-${c}-disabled`"
+      class="rounded-md bg-amber-50 p-3 text-sm text-amber-800"
+    >
+      {{ why }}
+    </p>
 
     <div
       v-if="store.contentError"
@@ -131,7 +139,7 @@ const fieldNames: Record<string, string> = {
           part="sms"
           :placeholder="regeneratePlaceholder"
           :busy="store.regenerating === 'sms'"
-          :disabled="store.busy"
+          :disabled="store.locked"
           @regenerate="store.regenerateChannel('sms', $event)"
         />
         <div v-if="sms" class="space-y-1">
@@ -141,7 +149,7 @@ const fieldNames: Record<string, string> = {
             data-test="sms-body"
             rows="5"
             :value="sms.body"
-            :disabled="store.busy"
+            :disabled="store.locked"
             :class="inputClass"
             @input="store.edit('sms', { body: inputValue($event) })"
             @change="store.save('sms')"
@@ -171,7 +179,7 @@ const fieldNames: Record<string, string> = {
           part="email"
           :placeholder="regeneratePlaceholder"
           :busy="store.regenerating === 'email'"
-          :disabled="store.busy"
+          :disabled="store.locked"
           @regenerate="store.regenerateChannel('email', $event)"
         />
         <div v-if="email" class="space-y-3 text-sm">
@@ -193,7 +201,7 @@ const fieldNames: Record<string, string> = {
               :data-test="`email-${f.test}`"
               :rows="f.multiline ? 8 : undefined"
               :value="email[f.field] ?? ''"
-              :disabled="store.busy"
+              :disabled="store.locked"
               :class="inputClass"
               @input="store.edit('email', { [f.field]: inputValue($event) })"
               @change="store.save('email')"

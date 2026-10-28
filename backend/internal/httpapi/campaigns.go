@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"campaigncomposer/internal/content"
 	"campaigncomposer/internal/llm"
 	"campaigncomposer/internal/segment"
 )
@@ -25,6 +27,53 @@ type campaignView struct {
 	Audience segment.Audience `json:"audience"`
 	// Repairs is how many repairs the Segment call needed (ADR-0005).
 	Repairs int `json:"repairs"`
+	// EnabledChannels starts as every Channel whose Audience is not empty;
+	// DisabledChannels explains each one that was turned off for that reason.
+	EnabledChannels  []string          `json:"enabled_channels"`
+	DisabledChannels map[string]string `json:"disabled_channels"`
+}
+
+// campaignAudience counts a stored Campaign's Audience per Channel.
+func campaignAudience(ctx context.Context, q segment.Querier, id int64) (segment.Audience, error) {
+	var ruleJSON []byte
+	if err := q.QueryRow(ctx, `SELECT segment_rule FROM campaigns WHERE id = $1`, id).Scan(&ruleJSON); err != nil {
+		return segment.Audience{}, err
+	}
+	rule, err := storedRule(ruleJSON)
+	if err != nil {
+		return segment.Audience{}, err
+	}
+	return segment.CountAudience(ctx, q, rule)
+}
+
+func audienceSize(a segment.Audience, channel string) int {
+	if channel == "sms" {
+		return a.SMS
+	}
+	return a.Email
+}
+
+// withAudience keeps the Channels whose Audience has a consenting Recipient.
+func withAudience(channels []string, a segment.Audience) []string {
+	out := []string{}
+	for _, ch := range channels {
+		if audienceSize(a, ch) > 0 {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// disabledChannels explains, per Channel with an empty Audience, why it is
+// turned off and can't be turned on.
+func disabledChannels(a segment.Audience) map[string]string {
+	out := map[string]string{}
+	for _, ch := range content.Channels {
+		if audienceSize(a, ch) == 0 {
+			out[ch] = "Bu hedef kitlede " + channelNames[ch] + " için izin vermiş alıcı yok, bu yüzden kanal kapatıldı."
+		}
+	}
+	return out
 }
 
 const segmentFailed = "Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin."
@@ -62,17 +111,19 @@ func (s *server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// The Campaign is stored only once it has a valid Segment Rule, so failed
-	// generations leave nothing behind.
 	c := campaignView{Brief: brief, Repairs: repairs}
-	if err := s.pool.QueryRow(ctx, `INSERT INTO campaigns (brief, segment_rule, unsupported_criteria)
-		VALUES ($1, $2, $3) RETURNING id, status`, brief, ruleJSON, proposal.UnsupportedCriteria).
-		Scan(&c.ID, &c.Status); err != nil {
-		writeError(w, err)
-		return
-	}
 	if c.Audience, err = segment.CountAudience(ctx, s.pool, proposal.Rule); err != nil {
 		writeError(w, fmt.Errorf("count audience: %w", err))
+		return
+	}
+	c.EnabledChannels = withAudience(content.Channels, c.Audience)
+	c.DisabledChannels = disabledChannels(c.Audience)
+	// The Campaign is stored only once it has a valid Segment Rule, so failed
+	// generations leave nothing behind.
+	if err := s.pool.QueryRow(ctx, `INSERT INTO campaigns (brief, segment_rule, unsupported_criteria, enabled_channels)
+		VALUES ($1, $2, $3, $4) RETURNING id, status`, brief, ruleJSON, proposal.UnsupportedCriteria, c.EnabledChannels).
+		Scan(&c.ID, &c.Status); err != nil {
+		writeError(w, err)
 		return
 	}
 	c.Segment = segmentView{

@@ -44,6 +44,7 @@ func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
 	mux.HandleFunc("POST /api/campaigns/{id}/content/{channel}/regenerate", s.regenerateContent)
 	mux.HandleFunc("POST /api/campaigns/{id}/segment/regenerate", s.regenerateSegment)
 	mux.HandleFunc("PUT /api/campaigns/{id}/channels/{channel}", s.setChannel)
+	mux.HandleFunc("POST /api/campaigns/{id}/approve", s.approveCampaign)
 	mux.HandleFunc("POST /api/email/preview", s.previewEmail)
 	return mux
 }

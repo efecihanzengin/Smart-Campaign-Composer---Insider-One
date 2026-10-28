@@ -48,6 +48,21 @@ func (s *server) regenerationTarget(w http.ResponseWriter, r *http.Request) (sto
 	return c, req.Instruction, true
 }
 
+// markGeneration marks a regeneration as running, so approval waits for it
+// (see beginGeneration), writing the error response itself when it can't.
+func (s *server) markGeneration(w http.ResponseWriter, r *http.Request, id int64) (func(), bool) {
+	end, err := s.beginGeneration(r.Context(), id)
+	if errors.Is(err, errNotDraft) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
+		return nil, false
+	}
+	if err != nil {
+		writeError(w, err)
+		return nil, false
+	}
+	return end, true
+}
+
 // regenerateContent asks Claude to rewrite one Channel's Content, with the
 // Marketer's optional instruction, and streams it over SSE like the first
 // Content call. Only that Channel's Content is replaced; the other Channel's,
@@ -64,6 +79,11 @@ func (s *server) regenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	endGeneration, ok := s.markGeneration(w, r, c.id)
+	if !ok {
+		return
+	}
+	defer endGeneration()
 	stored, _, err := s.storedContent(ctx, c.id)
 	if err != nil {
 		writeError(w, err)
@@ -127,22 +147,27 @@ func (s *server) regenerateContent(w http.ResponseWriter, r *http.Request) {
 // against the new Audience.
 type regeneratedSegment struct {
 	campaignView
-	EnabledChannels []string                      `json:"enabled_channels"`
-	Content         contentView                   `json:"content"`
-	Validation      map[string]content.Validation `json:"validation"`
+	Content    contentView                   `json:"content"`
+	Validation map[string]content.Validation `json:"validation"`
 }
 
 // regenerateSegment asks Claude for a new Segment Rule, with the Marketer's
 // optional instruction, through the same repair loop as the first one. The
 // Content is never regenerated: it is kept as it is, the Marketer's edits
 // included, and only validated again against the new Audience's longest
-// placeholder values, so Content that no longer fits comes back flagged.
+// placeholder values, so Content that no longer fits comes back flagged. A
+// Channel whose new Audience is empty is turned off, as on creation.
 func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 	c, instruction, ok := s.regenerationTarget(w, r)
 	if !ok {
 		return
 	}
 	ctx := r.Context()
+	endGeneration, ok := s.markGeneration(w, r, c.id)
+	if !ok {
+		return
+	}
+	defer endGeneration()
 	var unsupported []string
 	if err := s.pool.QueryRow(ctx, `SELECT unsupported_criteria FROM campaigns WHERE id = $1`, c.id).
 		Scan(&unsupported); err != nil {
@@ -175,17 +200,6 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	tag, err := s.pool.Exec(ctx, `UPDATE campaigns SET segment_rule = $2, unsupported_criteria = $3
-		WHERE id = $1 AND status = 'draft'`, c.id, ruleJSON, proposal.UnsupportedCriteria)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if tag.RowsAffected() == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
-		return
-	}
-
 	out := regeneratedSegment{campaignView: campaignView{
 		ID: c.id, Status: c.status, Brief: c.brief, Repairs: repairs,
 		Segment: segmentView{
@@ -196,6 +210,21 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 	}}
 	if out.Audience, err = segment.CountAudience(ctx, s.pool, proposal.Rule); err != nil {
 		writeError(w, fmt.Errorf("count audience: %w", err))
+		return
+	}
+	out.DisabledChannels = disabledChannels(out.Audience)
+	// Channels stay as the Marketer set them, except those left without a
+	// consenting Recipient.
+	tag, err := s.pool.Exec(ctx, `UPDATE campaigns SET segment_rule = $2, unsupported_criteria = $3,
+			enabled_channels = ARRAY(SELECT ch FROM unnest(enabled_channels) AS ch WHERE ch = ANY ($4))
+		WHERE id = $1 AND status = 'draft'`,
+		c.id, ruleJSON, proposal.UnsupportedCriteria, withAudience(content.Channels, out.Audience))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
 		return
 	}
 	longest, err := s.longest(ctx, proposal.Rule)

@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import {
   ApiError,
+  ApprovalRefused,
+  approveCampaign,
   channels,
   createCampaign,
   previewEmail,
@@ -10,6 +12,7 @@ import {
   streamContent,
   updateContent,
   validateContent,
+  type Approval,
   type Campaign,
   type Channel,
   type Content,
@@ -24,6 +27,8 @@ const unreachable = 'Sunucuya ulaşılamadı. Lütfen tekrar deneyin.'
 export const validateDelay = 300
 
 const message = (e: unknown) => (e instanceof ApiError ? e.message : unreachable)
+
+const channelNames: Record<Channel, string> = { sms: 'SMS', email: 'E-posta' }
 
 export const useCampaignStore = defineStore('campaign', {
   state: () => ({
@@ -46,8 +51,11 @@ export const useCampaignStore = defineStore('campaign', {
     // answer for older text never overwrites a newer one.
     revisions: { sms: 0, email: 0 } as Record<Channel, number>,
     validateTimers: {} as Partial<Record<Channel, ReturnType<typeof setTimeout>>>,
-    // dirty marks Channels with edits that are not saved yet.
-    dirty: { sms: false, email: false } as Record<Channel, boolean>,
+    // unsaved marks Channels edited since their last save.
+    unsaved: { sms: false, email: false } as Record<Channel, boolean>,
+    approving: false,
+    approval: null as Approval | null,
+    approvalError: null as string | null,
     // regenerating is the Channel whose Content Claude is rewriting.
     regenerating: null as Channel | null,
     // lastRegeneration is the Channel regeneration a retry runs again.
@@ -61,8 +69,27 @@ export const useCampaignStore = defineStore('campaign', {
     revalidated: false,
   }),
   getters: {
-    // busy is true while Claude is writing anything; nothing is editable then.
-    busy: (s) => s.streaming || s.segmentRegenerating,
+    // disabledChannels explains each Channel turned off because its Audience
+    // has no consenting Recipient.
+    disabledChannels: (s): Partial<Record<Channel, string>> => s.campaign?.disabled_channels ?? {},
+    // locked is true while the Content can't change: Claude is writing (the
+    // Content or a new Segment Rule), or the Campaign is no longer a draft.
+    locked: (s) => s.streaming || s.segmentRegenerating || (s.campaign !== null && s.campaign.status !== 'draft'),
+    // approvalBlockers lists why the Campaign can't be approved yet. The
+    // backend checks the same guards again when it freezes the Audience.
+    approvalBlockers(s): string[] {
+      if (s.streaming) return ['İçerik hâlâ üretiliyor; bitmesini bekleyin.']
+      if (s.segmentRegenerating) return ['Hedef kitle yeniden üretiliyor; bitmesini bekleyin.']
+      if (!s.campaign) return []
+      if (s.enabledChannels.length === 0) return ['En az bir kanal açık olmalı.']
+      const out: string[] = []
+      for (const c of s.enabledChannels) {
+        if (!s.content[c]) out.push(`${channelNames[c]} içeriği yok.`)
+        else if (!s.validation[c]?.valid) out.push(`${channelNames[c]} içeriği kurallara uymuyor.`)
+        if (s.campaign.audience[c] === 0) out.push(`${channelNames[c]} kanalında izin vermiş alıcı yok.`)
+      }
+      return out
+    },
   },
   actions: {
     async create(brief: string) {
@@ -80,7 +107,10 @@ export const useCampaignStore = defineStore('campaign', {
       } finally {
         this.generating = false
       }
-      if (this.campaign) await this.generateContent()
+      if (this.campaign) {
+        this.enabledChannels = this.campaign.enabled_channels ?? [...channels]
+        await this.generateContent()
+      }
     },
 
     resetContent() {
@@ -94,13 +124,15 @@ export const useCampaignStore = defineStore('campaign', {
       this.contentError = null
       this.contentRetryable = false
       this.emailPreview = null
-      this.dirty = { sms: false, email: false }
+      this.unsaved = { sms: false, email: false }
+      this.approval = null
+      this.approvalError = null
       this.lastRegeneration = null
       this.revalidated = false
     },
 
-    // retry runs the failed step again: the Segment call if no Campaign was
-    // created, otherwise the Content call.
+    // retry runs the failed step again: a Channel's regeneration, the Segment
+    // call if no Campaign was created, otherwise the Content call.
     async retry() {
       if (this.lastRegeneration) {
         const { channel, instruction } = this.lastRegeneration
@@ -120,7 +152,9 @@ export const useCampaignStore = defineStore('campaign', {
             case 'content.delta':
               this.content = { sms: e.data.sms, email: e.data.email }
               if (e.data.channels) {
-                this.enabledChannels = channels.filter((c) => e.data.channels!.includes(c))
+                this.enabledChannels = channels.filter(
+                  (c) => e.data.channels!.includes(c) && !this.disabledChannels[c],
+                )
               }
               break
             case 'content.repair':
@@ -161,9 +195,9 @@ export const useCampaignStore = defineStore('campaign', {
     // edit applies the Marketer's change to one Channel's Content and asks the
     // backend validator about it once typing pauses, for the live counters.
     edit<C extends Channel>(channel: C, patch: Partial<NonNullable<Content[C]>>) {
-      if (this.busy) return
-      this.dirty[channel] = true
+      if (this.locked) return
       this.content = { ...this.content, [channel]: { ...this.content[channel], ...patch } }
+      this.unsaved[channel] = true
       const revision = ++this.revisions[channel]
       clearTimeout(this.validateTimers[channel])
       this.validateTimers[channel] = setTimeout(() => this.runValidation(channel, revision), validateDelay)
@@ -184,12 +218,12 @@ export const useCampaignStore = defineStore('campaign', {
     // save stores the Marketer's edit of one Channel's Content.
     async save(channel: Channel) {
       const c = this.content[channel]
-      if (!this.campaign || !c || this.busy) return
+      if (!this.campaign || !c || this.locked) return
       clearTimeout(this.validateTimers[channel])
       const revision = this.revisions[channel]
       try {
         const v = await updateContent(this.campaign.id, channel, c)
-        if (revision === this.revisions[channel]) this.dirty[channel] = false
+        if (revision === this.revisions[channel]) this.unsaved[channel] = false
         if (revision === this.revisions[channel]) this.validation = { ...this.validation, [channel]: v }
       } catch (e) {
         this.contentError = message(e)
@@ -207,14 +241,14 @@ export const useCampaignStore = defineStore('campaign', {
     // saveEdits stores every unsaved edit, so Claude and the validator see
     // the Content the Marketer sees.
     async saveEdits() {
-      for (const c of channels) if (this.dirty[c]) await this.save(c)
+      for (const c of channels) if (this.unsaved[c]) await this.save(c)
     },
 
     // regenerateChannel asks Claude to rewrite one Channel's Content with the
     // Marketer's optional instruction. Only that Channel streams and changes;
     // if Claude fails, its current Content stays.
     async regenerateChannel(channel: Channel, instruction: string) {
-      if (!this.campaign || this.busy) return
+      if (!this.campaign || this.locked) return
       await this.saveEdits()
       const previous = { content: this.content[channel], validation: this.validation[channel] }
       const restore = () => {
@@ -273,7 +307,7 @@ export const useCampaignStore = defineStore('campaign', {
     // regenerateSegment asks Claude for a new Segment Rule. The Content is
     // kept, edits included, and only validated again against the new Audience.
     async regenerateSegment(instruction: string) {
-      if (!this.campaign || this.busy) return
+      if (!this.campaign || this.locked) return
       await this.saveEdits()
       this.segmentRegenerating = true
       this.segmentError = null
@@ -281,8 +315,8 @@ export const useCampaignStore = defineStore('campaign', {
       this.lastSegmentInstruction = instruction
       try {
         const r = await regenerateSegment(this.campaign.id, instruction)
-        const { id, status, brief, segment, audience, repairs } = r
-        this.campaign = { id, status, brief, segment, audience, repairs }
+        const { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels } = r
+        this.campaign = { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels }
         // Validation answers for the old Audience must not overwrite these.
         for (const c of channels) this.revisions[c]++
         this.validation = r.validation
@@ -301,11 +335,33 @@ export const useCampaignStore = defineStore('campaign', {
     },
 
     async toggleChannel(channel: Channel, enabled: boolean) {
-      if (!this.campaign) return
+      if (!this.campaign || this.locked) return
       try {
         this.enabledChannels = await setChannel(this.campaign.id, channel, enabled)
       } catch (e) {
         this.contentError = message(e)
+      }
+    },
+
+    // approve freezes the Audience into Deliveries, saving unsaved edits first
+    // so the backend approves exactly what the Marketer sees.
+    async approve() {
+      if (!this.campaign || this.approving || this.approvalBlockers.length) return
+      this.approving = true
+      this.approvalError = null
+      try {
+        for (const c of channels) {
+          if (this.unsaved[c]) await this.save(c)
+        }
+        if (this.contentError || channels.some((c) => this.unsaved[c])) return
+        if (this.approvalBlockers.length) return
+        this.approval = await approveCampaign(this.campaign.id)
+        this.campaign = { ...this.campaign, status: this.approval.status }
+      } catch (e) {
+        this.approvalError =
+          e instanceof ApprovalRefused && e.reasons.length ? e.reasons.map((r) => r.message).join(' ') : message(e)
+      } finally {
+        this.approving = false
       }
     },
   },

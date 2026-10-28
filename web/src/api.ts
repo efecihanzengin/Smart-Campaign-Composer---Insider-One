@@ -24,6 +24,9 @@ export interface Campaign {
     unsupported_criteria: string[]
   }
   audience: Audience
+  // Channels with an empty Audience start disabled; disabled_channels says why.
+  enabled_channels?: Channel[]
+  disabled_channels?: Partial<Record<Channel, string>>
   // repairs is how many repairs the Segment call needed (ADR-0005).
   repairs?: number
 }
@@ -225,4 +228,36 @@ export async function previewEmail(email: EmailContent): Promise<string> {
   })
   if (!res.ok) throw new ApiError(`POST /api/email/preview: ${res.status}`)
   return res.text()
+}
+
+// ApprovalReason is one reason the backend refused approval.
+export interface ApprovalReason {
+  code: string
+  channel?: Channel
+  message: string
+}
+
+export interface Approval {
+  id: number
+  status: string
+  deliveries: Partial<Record<Channel, number>>
+}
+
+// ApprovalRefused carries the reasons the backend refused approval for.
+export class ApprovalRefused extends ApiError {
+  constructor(
+    message: string,
+    readonly reasons: ApprovalReason[],
+  ) {
+    super(message)
+  }
+}
+
+// approveCampaign freezes the Campaign's Audience into Deliveries.
+export async function approveCampaign(id: number): Promise<Approval> {
+  const res = await fetch(`/api/campaigns/${id}/approve`, { method: 'POST' })
+  const body = await res.json().catch(() => null)
+  if (res.status === 422) throw new ApprovalRefused(body?.error ?? 'Kampanya onaylanamaz.', body?.reasons ?? [])
+  if (!res.ok) throw new ApiError(body?.error ?? `POST approve: ${res.status}`)
+  return body
 }
