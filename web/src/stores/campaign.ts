@@ -47,6 +47,8 @@ export const useCampaignStore = defineStore('campaign', {
     contentRetryable: false,
     // repairing is set while Claude repairs rejected Content (ADR-0005).
     repairing: null as RepairNotice | null,
+    // segmentRepairing is set while Claude repairs a rejected Segment Rule.
+    segmentRepairing: null as RepairNotice | null,
     emailPreview: null as string | null,
     // revisions count the Marketer's edits per Channel, so a slow validation
     // answer for older text never overwrites a newer one.
@@ -102,12 +104,13 @@ export const useCampaignStore = defineStore('campaign', {
       this.campaign = null
       this.resetContent()
       try {
-        this.campaign = await createCampaign(brief)
+        this.campaign = await createCampaign(brief, (n) => (this.segmentRepairing = n))
       } catch (e) {
         this.error = message(e)
         this.retryable = e instanceof ApiError ? e.retryable : true
       } finally {
         this.generating = false
+        this.segmentRepairing = null
       }
       if (this.campaign) {
         this.enabledChannels = this.campaign.enabled_channels ?? [...channels]
@@ -316,7 +319,7 @@ export const useCampaignStore = defineStore('campaign', {
       this.segmentRetryable = false
       this.lastSegmentInstruction = instruction
       try {
-        const r = await regenerateSegment(this.campaign.id, instruction)
+        const r = await regenerateSegment(this.campaign.id, instruction, (n) => (this.segmentRepairing = n))
         const { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels } = r
         this.campaign = { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels }
         // Validation answers for the old Audience must not overwrite these.
@@ -329,6 +332,7 @@ export const useCampaignStore = defineStore('campaign', {
         this.segmentRetryable = e instanceof ApiError ? e.retryable : true
       } finally {
         this.segmentRegenerating = false
+        this.segmentRepairing = null
       }
     },
 

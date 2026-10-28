@@ -177,10 +177,10 @@ func result(issues []Issue, usage map[string]Length) Validation {
 	return Validation{Valid: len(issues) == 0, Issues: issues, Usage: usage}
 }
 
-// Longest holds, per Channel, the longest placeholder values in that Channel's
-// Audience. Lengths are checked after rendering with them, so no Recipient's
-// message overflows (ADR-0002).
-type Longest struct {
+// LongestValues holds, per Channel, the longest placeholder values in that Channel's
+// Audience. Lengths are checked after rendering with them, so Content
+// rendered for any Recipient fits (ADR-0002).
+type LongestValues struct {
 	SMS, Email Sample
 }
 
@@ -244,7 +244,7 @@ func ValidateEmail(e *Email, longest Sample) Validation {
 }
 
 // Validate checks the Content of every Channel in p.Channels.
-func Validate(p Proposal, longest Longest) map[string]Validation {
+func Validate(p Proposal, longest LongestValues) map[string]Validation {
 	out := map[string]Validation{}
 	for _, ch := range p.Channels {
 		switch ch {

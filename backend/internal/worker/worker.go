@@ -19,12 +19,11 @@ import (
 	"sync"
 	"time"
 
+	"campaigncomposer/internal/content"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-// Channels are the Channels the worker sends on, each with its own loop.
-var Channels = []string{"sms", "email"}
 
 // Options configures a Worker. Zero values take the defaults below.
 type Options struct {
@@ -121,9 +120,9 @@ func New(pool *pgxpool.Pool, opts Options) *Worker {
 		log.Printf("worker: lease %v is under twice the Provider timeout; using %v", opts.Lease, opts.withDefaults().Lease)
 	}
 	opts = opts.withDefaults()
-	buckets := make(map[string]*Bucket, len(Channels))
-	for _, ch := range Channels {
-		buckets[ch] = NewBucket(opts.RateLimit*paceHeadroom, nil)
+	buckets := make(map[string]*Bucket, len(content.Channels))
+	for _, ch := range content.Channels {
+		buckets[ch] = NewBucket(opts.RateLimit * paceHeadroom)
 	}
 	return &Worker{
 		pool:    pool,
@@ -139,8 +138,8 @@ func New(pool *pgxpool.Pool, opts Options) *Worker {
 // another worker reclaims them.
 func (w *Worker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	errs := make(chan error, len(Channels))
-	for _, ch := range Channels {
+	errs := make(chan error, len(content.Channels))
+	for _, ch := range content.Channels {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -181,8 +180,9 @@ type delivery struct {
 	attempt int
 }
 
-// drainBatch claims one batch, sends it, and completes the Campaigns that
-// have nothing left to send. It returns how many Deliveries it claimed.
+// drainBatch claims one batch, sends it, completes the Campaigns that have
+// nothing left to send and cancels what cancelled Campaigns will never send.
+// It returns how many Deliveries it claimed.
 func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 	startBy := time.Now().Add(w.opts.startWindow())
 	batch, err := w.claim(ctx, channel, w.batchSize(channel))
@@ -209,7 +209,7 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 		}()
 	}
 	wg.Wait()
-	return len(batch), w.completeCampaigns(context.WithoutCancel(ctx))
+	return len(batch), w.settleCampaigns(context.WithoutCancel(ctx))
 }
 
 // batchSize is how many Deliveries to claim: BatchSize, but no more than the
@@ -222,14 +222,18 @@ func (w *Worker) batchSize(channel string) int {
 
 // claim moves up to n due Deliveries of the Channel to `sending`
 // under a lease, and moves their Campaigns from `approved` to `sending`.
-// Only Campaigns that are `approved` or `sending` are claimed from, so a
-// cancelled Campaign (#16) gets no new claims.
+// Campaigns that are `approved` or `sending` are claimed from. A cancelled
+// Campaign (#16) gets no new claims, except for Deliveries that were in
+// flight when it was cancelled and whose outcome is unknown (ADR-0006): those
+// left `sending` past their lease, and those whose request got no answer.
+// They are sent again with the same Idempotency-Key, so the Provider replays
+// the original result and the final counts are true.
 //
 // The claim takes FOR SHARE on each Campaign it claims from. A cancel that
 // commits while the claim runs therefore either waits for the claim (whose
 // Deliveries are then in flight and finish), or is seen by it: the share lock
 // re-reads the Campaign and drops its Deliveries. Once a cancel has
-// committed, no Delivery still `pending` is claimed.
+// committed, no Delivery that was never handed to the Provider is claimed.
 //
 // The approved -> sending move runs as its own statement after the claim
 // commits: two claims holding the share lock on the same Campaign (one per
@@ -247,7 +251,8 @@ func (w *Worker) claim(ctx context.Context, channel string, n int) ([]delivery, 
 			WHERE d.channel = $1
 				AND ((d.state = 'pending' AND d.next_attempt_at <= now())
 					OR (d.state = 'sending' AND d.lease_expires_at < now()))
-				AND c.status IN ('approved', 'sending')
+				AND (c.status IN ('approved', 'sending')
+					OR (c.status = 'cancelled' AND (d.state = 'sending' OR delivery_outcome_unknown(d.id))))
 			ORDER BY d.next_attempt_at, d.id
 			LIMIT $2
 			FOR UPDATE OF d SKIP LOCKED
@@ -449,12 +454,17 @@ func parseRetryAfter(v string, now time.Time) time.Duration {
 	return 0
 }
 
-// completeCampaigns moves every Campaign with no Delivery left `pending` or
-// `sending` to `completed`.
-func (w *Worker) completeCampaigns(ctx context.Context) error {
-	_, err := w.pool.Exec(ctx, `UPDATE campaigns c SET status = 'completed'
+// settleCampaigns moves every Campaign with no Delivery left `pending` or
+// `sending` to `completed`, and cancels the `pending` Deliveries of cancelled
+// Campaigns that will not be sent: those the api's cancel skipped, and those
+// in flight at cancel that came back without being handed over.
+func (w *Worker) settleCampaigns(ctx context.Context) error {
+	if _, err := w.pool.Exec(ctx, `UPDATE campaigns c SET status = 'completed'
 		WHERE c.status IN ('approved', 'sending')
 			AND EXISTS (SELECT 1 FROM deliveries d WHERE d.campaign_id = c.id)
-			AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.campaign_id = c.id AND d.state IN ('pending', 'sending'))`)
+			AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.campaign_id = c.id AND d.state IN ('pending', 'sending'))`); err != nil {
+		return err
+	}
+	_, err := w.pool.Exec(ctx, `SELECT cancel_unsent_deliveries()`)
 	return err
 }

@@ -66,7 +66,7 @@ func streamChunks(ctx context.Context, s string, size int, delay time.Duration, 
 
 // defaultContent is the mock's stand-in for Claude writing Content: it picks
 // Channels from the Brief (both unless only one is named) and writes Turkish
-// copy for a Turkish Brief, English otherwise. A regeneration writes only the
+// Content for a Turkish Brief, English otherwise. A regeneration writes only the
 // asked Channel, in a different wording, or a shorter one when the
 // instruction asks for it.
 func defaultContent(brief string, regen *Regeneration) string {

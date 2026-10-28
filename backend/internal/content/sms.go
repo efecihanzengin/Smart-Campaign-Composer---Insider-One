@@ -77,14 +77,15 @@ func toGSM7(value string) string {
 	}, value)
 }
 
-// smsEncoding is the encoding an SMS template is sent in, decided by its own
+// smsEncoding is the encoding SMS Content is sent in, decided by its own
 // text alone: placeholder values never change it.
 func smsEncoding(body string) string {
 	return MeasureSMS(placeholderToken.ReplaceAllString(body, "")).Encoding
 }
 
-// RenderSMS fills an SMS template for one Recipient. In a GSM-7 SMS the values
-// are made GSM-7 (ADR-0002), so the message keeps its encoding and its limit.
+// RenderSMS fills SMS Content's placeholders for one Recipient. In GSM-7
+// Content the values are made GSM-7 (ADR-0002), so the rendered SMS keeps its
+// encoding and its limit.
 func RenderSMS(body string, r Sample) string {
 	if smsEncoding(body) == GSM7 {
 		r = Sample{FirstName: toGSM7(r.FirstName), City: toGSM7(r.City)}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 
 	"campaigncomposer/internal/content"
@@ -28,14 +27,13 @@ type approvalResult struct {
 // (consent included), renders each Recipient's Content, inserts the
 // Deliveries and moves the Campaign to approved.
 func (s *server) approveCampaign(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+	id, ok := campaignID(w, r)
+	if !ok {
 		return
 	}
 	ctx := r.Context()
 	var res approvalResult
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var err error
 		res, err = approve(ctx, tx, id)
 		return err
@@ -45,7 +43,7 @@ func (s *server) approveCampaign(w http.ResponseWriter, r *http.Request) {
 	var blocked *blockedError
 	switch {
 	case errors.As(err, &notFound):
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": campaignNotFound})
 	case errors.As(err, &conflict):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": conflict.message})
 	case errors.As(err, &blocked):
@@ -85,10 +83,11 @@ func approve(ctx context.Context, tx pgx.Tx, id int64) (approvalResult, error) {
 	var enabled []string
 	var generating bool
 	// The row lock serializes approvals and makes the draft guards of edits,
-	// toggles and generation wait for this transaction.
+	// toggles and generation wait for this transaction. A generation counts
+	// while its registration is unexpired (see trackGeneration).
 	err := tx.QueryRow(ctx, `SELECT status, segment_rule, enabled_channels,
-			coalesce(generation_started_at > now() - make_interval(secs => $2), false)
-		FROM campaigns WHERE id = $1 FOR UPDATE`, id, generationTimeout.Seconds()).
+			EXISTS (SELECT 1 FROM generations g WHERE g.campaign_id = c.id AND g.expires_at > clock_timestamp())
+		FROM campaigns c WHERE id = $1 FOR UPDATE OF c`, id).
 		Scan(&status, &ruleJSON, &enabled, &generating)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return approvalResult{}, &notFoundError{}
@@ -103,10 +102,11 @@ func approve(ctx context.Context, tx pgx.Tx, id int64) (approvalResult, error) {
 	if err != nil {
 		return approvalResult{}, err
 	}
-	p, err := storedContent(ctx, tx, id, enabled)
+	stored, err := readContent(ctx, tx, id)
 	if err != nil {
 		return approvalResult{}, err
 	}
+	p := stored.proposal(enabled)
 
 	// Every guard is checked against the data as it is now: Content is
 	// re-validated against the current Audience, and the Audience is read with
@@ -119,14 +119,11 @@ func approve(ctx context.Context, tx pgx.Tx, id int64) (approvalResult, error) {
 	if len(enabled) == 0 {
 		reasons = append(reasons, blockReason{Code: "no_channel", Message: "En az bir kanal açık olmalı."})
 	}
-	sms, email, err := segment.LongestValues(ctx, tx, rule)
+	longest, err := longestValues(ctx, tx, rule)
 	if err != nil {
 		return approvalResult{}, err
 	}
-	validation := content.Validate(p, content.Longest{
-		SMS:   content.Sample{FirstName: sms.FirstName, City: sms.City},
-		Email: content.Sample{FirstName: email.FirstName, City: email.City},
-	})
+	validation := content.Validate(p, longest)
 	audience := map[string][]segment.Member{}
 	for _, ch := range content.Channels {
 		if !slices.Contains(enabled, ch) {
@@ -167,29 +164,6 @@ func invalidMessage(channel string, v content.Validation) string {
 		issues[i] = is.Message
 	}
 	return channelNames[channel] + " içeriği kurallara uymuyor: " + strings.Join(issues, " ")
-}
-
-// storedContent reads the Content of the enabled Channels.
-func storedContent(ctx context.Context, tx pgx.Tx, id int64, enabled []string) (content.Proposal, error) {
-	p := content.Proposal{Channels: enabled}
-	rows, err := tx.Query(ctx, `SELECT channel, subject, preheader, body, cta_text FROM contents WHERE campaign_id = $1`, id)
-	if err != nil {
-		return p, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ch, subject, preheader, body, cta string
-		if err := rows.Scan(&ch, &subject, &preheader, &body, &cta); err != nil {
-			return p, err
-		}
-		switch {
-		case ch == "sms" && slices.Contains(enabled, ch):
-			p.SMS = &content.SMS{Body: body}
-		case ch == "email" && slices.Contains(enabled, ch):
-			p.Email = &content.Email{Subject: subject, Preheader: preheader, Body: body, CTAText: cta}
-		}
-	}
-	return p, rows.Err()
 }
 
 type smsPayload struct {

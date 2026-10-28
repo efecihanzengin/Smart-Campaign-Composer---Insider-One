@@ -7,19 +7,20 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"campaigncomposer/internal/segment"
 )
 
 // channelCounts is a Channel's Deliveries by state. Pending includes those
-// in flight (`sending`), since neither has an outcome yet.
+// in flight (`sending`), since neither has an outcome yet; Cancelled counts
+// those a cancelled Campaign never handed to the Provider.
 type channelCounts struct {
-	Pending int `json:"pending"`
-	Sent    int `json:"sent"`
-	Failed  int `json:"failed"`
-	Total   int `json:"total"`
+	Pending   int `json:"pending"`
+	Sent      int `json:"sent"`
+	Failed    int `json:"failed"`
+	Cancelled int `json:"cancelled"`
+	Total     int `json:"total"`
 }
 
 // campaignProgress is a Campaign as the dashboard shows it.
@@ -28,7 +29,8 @@ type campaignProgress struct {
 	Brief      string                   `json:"brief"`
 	Status     string                   `json:"status"`
 	Deliveries map[string]channelCounts `json:"deliveries"`
-	// Progress is the share of Deliveries with an outcome, from 0 to 1.
+	// Progress is the share of Deliveries with an outcome (sent, failed or
+	// cancelled), from 0 to 1.
 	Progress float64 `json:"progress"`
 }
 
@@ -36,7 +38,8 @@ const progressQuery = `
 	SELECT c.id, c.brief, c.status, d.channel,
 		count(*) FILTER (WHERE d.state IN ('pending', 'sending')),
 		count(*) FILTER (WHERE d.state = 'sent'),
-		count(*) FILTER (WHERE d.state = 'failed')
+		count(*) FILTER (WHERE d.state = 'failed'),
+		count(*) FILTER (WHERE d.state = 'cancelled')
 	FROM campaigns c
 	LEFT JOIN deliveries d ON d.campaign_id = c.id
 	WHERE %s
@@ -45,7 +48,7 @@ const progressQuery = `
 
 // campaignsProgress reads the Delivery counts of the Campaigns matching where
 // (an SQL condition over campaigns c with bound args), newest first.
-func campaignsProgress(ctx context.Context, q pgxQuerier, where string, args ...any) ([]campaignProgress, error) {
+func campaignsProgress(ctx context.Context, q segment.Querier, where string, args ...any) ([]campaignProgress, error) {
 	rows, err := q.Query(ctx, fmt.Sprintf(progressQuery, where), args...)
 	if err != nil {
 		return nil, err
@@ -57,21 +60,21 @@ func campaignsProgress(ctx context.Context, q pgxQuerier, where string, args ...
 		var brief, status string
 		var channel *string
 		var c channelCounts
-		if err := rows.Scan(&id, &brief, &status, &channel, &c.Pending, &c.Sent, &c.Failed); err != nil {
+		if err := rows.Scan(&id, &brief, &status, &channel, &c.Pending, &c.Sent, &c.Failed, &c.Cancelled); err != nil {
 			return nil, err
 		}
 		if len(out) == 0 || out[len(out)-1].ID != id {
 			out = append(out, campaignProgress{ID: id, Brief: brief, Status: status, Deliveries: map[string]channelCounts{}})
 		}
 		if channel != nil {
-			c.Total = c.Pending + c.Sent + c.Failed
+			c.Total = c.Pending + c.Sent + c.Failed + c.Cancelled
 			out[len(out)-1].Deliveries[*channel] = c
 		}
 	}
 	for i := range out {
 		var done, total int
 		for _, c := range out[i].Deliveries {
-			done += c.Sent + c.Failed
+			done += c.Sent + c.Failed + c.Cancelled
 			total += c.Total
 		}
 		if total > 0 {
@@ -81,14 +84,9 @@ func campaignsProgress(ctx context.Context, q pgxQuerier, where string, args ...
 	return out, rows.Err()
 }
 
-type pgxQuerier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
 func (s *server) getCampaign(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+	id, ok := campaignID(w, r)
+	if !ok {
 		return
 	}
 	cs, err := campaignsProgress(r.Context(), s.pool, "c.id = $1", id)
@@ -96,7 +94,7 @@ func (s *server) getCampaign(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeError(w, err)
 	case len(cs) == 0:
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": campaignNotFound})
 	default:
 		writeJSON(w, http.StatusOK, cs[0])
 	}

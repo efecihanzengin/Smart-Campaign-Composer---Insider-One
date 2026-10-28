@@ -109,9 +109,7 @@ func TestAChannelWithNoConsentingRecipientsIsDisabledWithAnExplanation(t *testin
 		DisabledChannels map[string]string `json:"disabled_channels"`
 		EnabledChannels  []string          `json:"enabled_channels"`
 	}
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}, &c); code != http.StatusCreated {
-		t.Fatalf("create campaign: status code = %d, want 201", code)
-	}
+	segmentDone(t, streamSegment(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}), &c)
 	if c.DisabledChannels["sms"] == "" || c.DisabledChannels["email"] != "" || strings.Join(c.EnabledChannels, ",") != "email" {
 		t.Errorf("campaign disabled %v, enabled %v; want only SMS disabled, with an explanation", c.DisabledChannels, c.EnabledChannels)
 	}

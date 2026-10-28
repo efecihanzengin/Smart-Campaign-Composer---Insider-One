@@ -1,5 +1,5 @@
--- One row per Provider request made for a Delivery, so an operator can see
--- why a Delivery was retried or failed. status_code is NULL when no response
+-- One row per Provider request made for a Delivery, so anyone running the
+-- system can see why a Delivery was retried or failed. status_code is NULL when no response
 -- arrived (timeout, connection error). outcome is what the worker did next:
 -- 'sent', 'retry' (back to pending with a later next_attempt_at) or
 -- 'failed' (permanent error, or the last allowed Attempt).

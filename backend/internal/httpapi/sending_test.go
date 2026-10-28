@@ -16,10 +16,11 @@ import (
 )
 
 type channelCounts struct {
-	Pending int `json:"pending"`
-	Sent    int `json:"sent"`
-	Failed  int `json:"failed"`
-	Total   int `json:"total"`
+	Pending   int `json:"pending"`
+	Sent      int `json:"sent"`
+	Failed    int `json:"failed"`
+	Cancelled int `json:"cancelled"`
+	Total     int `json:"total"`
 }
 
 type campaignState struct {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -41,9 +40,17 @@ func TestInvalidSegmentRuleIsRepairedIntoTheValidOne(t *testing.T) {
 	script := &segmentScript{answers: []string{unknownFieldSegment, ankaraSegment}}
 	srv := startAPI(t, httpapi.Options{LLM: &llm.Mock{SegmentFunc: script.call}})
 
+	events := streamSegment(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief})
 	var c createdCampaign
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}, &c); code != http.StatusCreated {
-		t.Fatalf("status code = %d, want 201", code)
+	segmentDone(t, events, &c)
+	// The Marketer is told while the repair runs, before the repaired rule arrives.
+	if names := eventNames(events); !slices.Equal(names, []string{"segment.repair", "segment.done"}) {
+		t.Errorf("events = %q, want a repair notice, then the rule", names)
+	}
+	notices := repairNotices(t, events)
+	if len(notices) != 1 || notices[0].Repair != 1 || notices[0].Max != 2 ||
+		!strings.Contains(strings.Join(notices[0].Errors, "\n"), "unknown field") {
+		t.Errorf("repair notices = %+v, want repair 1 of 2 naming the unknown field", notices)
 	}
 	if !slices.Equal(c.Segment.Labels, []string{"Şehir: Ankara"}) {
 		t.Errorf("labels = %q, want the repaired rule's [Şehir: Ankara]", c.Segment.Labels)
@@ -81,15 +88,12 @@ func TestSegmentRuleStillInvalidAfterTwoRepairsIsARetryableError(t *testing.T) {
 	}
 	srv, pool := startAPIWithPool(t, httpapi.Options{LLM: &llm.Mock{SegmentFunc: failSecond}})
 
-	var body struct {
-		Error     string `json:"error"`
-		Retryable bool   `json:"retryable"`
+	events := streamSegment(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief})
+	if body := lastError(t, events); body.Error == "" || !body.Retryable {
+		t.Errorf("error = %+v, want a retryable error message", body)
 	}
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}, &body); code != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want 502", code)
-	}
-	if body.Error == "" || !body.Retryable {
-		t.Errorf("body = %+v, want a retryable error message", body)
+	if names := eventNames(events); !slices.Equal(names, []string{"segment.repair", "segment.repair", "error"}) {
+		t.Errorf("events = %q, want two repair notices, then the error", names)
 	}
 	if len(script.requests) != 3 {
 		t.Fatalf("Segment calls = %d, want 1 + 2 repairs", len(script.requests))
@@ -132,16 +136,17 @@ type repairNotice struct {
 	Errors []string `json:"errors"`
 }
 
+// repairNotices decodes the stream's repair notices (content.repair or segment.repair).
 func repairNotices(t *testing.T, events []sseEvent) []repairNotice {
 	t.Helper()
 	var out []repairNotice
 	for _, e := range events {
-		if e.Name != "content.repair" {
+		if !strings.HasSuffix(e.Name, ".repair") {
 			continue
 		}
 		var n repairNotice
 		if err := json.Unmarshal(e.Data, &n); err != nil {
-			t.Fatalf("decode content.repair: %v", err)
+			t.Fatalf("decode %s: %v", e.Name, err)
 		}
 		out = append(out, n)
 	}

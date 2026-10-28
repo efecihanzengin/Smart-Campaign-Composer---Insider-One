@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import CampaignComposer from './CampaignComposer.vue'
+import { openStream, sse } from '../testing/sse'
 
 const campaign = {
   id: 7,
@@ -36,7 +37,7 @@ function mockApi() {
   let stream!: ReadableStreamDefaultController<Uint8Array>
   let segmentAnswer: () => Response = () => json({})
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url === '/api/campaigns') return json(campaign)
+    if (url === '/api/campaigns') return sse(['segment.done', campaign])
     if (url === '/api/campaigns/7/content' || /^\/api\/campaigns\/7\/content\/\w+\/regenerate$/.test(url)) {
       const body = new ReadableStream<Uint8Array>({ start: (c) => void (stream = c) })
       return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
@@ -167,15 +168,18 @@ describe('Regenerating the Segment Rule', () => {
   it('updates the labels and counts and re-validates the kept Content, flagging what no longer fits', async () => {
     const { api, wrapper } = await reviewed()
     api.segment(() =>
-      json({
-        ...campaign,
-        segment: { rule: { all: [] }, labels: ['Şehir: Diyarbakır'], unsupported_criteria: ['Cinsiyet: kadın'] },
-        audience: { sms: 97, email: 210 },
-        repairs: 0,
-        enabled_channels: ['sms', 'email'],
-        content: { sms, email },
-        validation: { sms: tooLong, email: valid },
-      }),
+      sse([
+        'segment.done',
+        {
+          ...campaign,
+          segment: { rule: { all: [] }, labels: ['Şehir: Diyarbakır'], unsupported_criteria: ['Cinsiyet: kadın'] },
+          audience: { sms: 97, email: 210 },
+          repairs: 0,
+          enabled_channels: ['sms', 'email'],
+          content: { sms, email },
+          validation: { sms: tooLong, email: valid },
+        },
+      ]),
     )
 
     await regenerate(wrapper, 'segment', 'sadece kadınlar')
@@ -196,7 +200,7 @@ describe('Regenerating the Segment Rule', () => {
 
   it('saves a pending edit first, so the Content checked against the new Audience is the edited one', async () => {
     const { api, wrapper } = await reviewed()
-    api.segment(() => json({ ...campaign, content: {}, validation: {}, enabled_channels: ['sms', 'email'] }))
+    api.segment(() => sse(['segment.done', { ...campaign, content: {}, validation: {}, enabled_channels: ['sms', 'email'] }]))
     const body = wrapper.get('[data-test="sms-body"]')
     ;(body.element as HTMLTextAreaElement).value = 'Elle yazıldı'
     await body.trigger('input')
@@ -210,10 +214,34 @@ describe('Regenerating the Segment Rule', () => {
     expect(value(wrapper, 'sms-body')).toBe('Elle yazıldı')
   })
 
+  it('shows that the Segment Rule is being repaired, and keeps editing and approval locked meanwhile', async () => {
+    const { api, wrapper } = await reviewed()
+    const stream = openStream()
+    api.segment(() => stream.response)
+
+    await regenerate(wrapper, 'segment', 'sadece Ankara')
+    await stream.send('segment.repair', { repair: 1, max: 2, errors: ['rule.all[0].field: unknown field'] })
+
+    expect(wrapper.get('[data-test="segment-repairing"]').text()).toContain('1/2')
+    expect(wrapper.get('[data-test="sms-body"]').attributes('disabled')).toBeDefined()
+
+    await stream.send('segment.done', {
+      ...campaign,
+      segment: { rule: { all: [] }, labels: ['Şehir: Ankara'], unsupported_criteria: [] },
+      repairs: 1,
+      enabled_channels: ['sms', 'email'],
+      content: { sms, email },
+      validation: { sms: valid, email: valid },
+    })
+    await stream.end()
+    expect(wrapper.find('[data-test="segment-repairing"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="segment-label"]').map((l) => l.text())).toEqual(['Şehir: Ankara'])
+  })
+
   it('shows a retryable error and keeps the current Segment Rule when it fails', async () => {
     const { api, wrapper } = await reviewed()
     api.segment(() =>
-      json({ error: 'Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin.', retryable: true }, 502),
+      sse(['error', { error: 'Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin.', retryable: true }]),
     )
 
     await regenerate(wrapper, 'segment', 'x')

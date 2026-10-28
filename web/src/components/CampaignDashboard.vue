@@ -43,7 +43,11 @@ const statusNames: Record<string, string> = {
 const channelNames = { sms: 'SMS', email: 'E-posta' }
 
 const percent = (c: CampaignProgress) => Math.round(c.progress * 100)
-const channelPercent = (c: ChannelCounts) => (c.total ? Math.round(((c.sent + c.failed) / c.total) * 100) : 0)
+const channelPercent = (c: ChannelCounts) =>
+  c.total ? Math.round(((c.sent + c.failed + (c.cancelled ?? 0)) / c.total) * 100) : 0
+// A cancelled Campaign has nothing left waiting, only Deliveries still in
+// flight; its unsent ones are shown as cancelled instead.
+const showPending = (c: CampaignProgress, counts: ChannelCounts) => c.status !== 'cancelled' || counts.pending > 0
 const formatCount = (n: number) => n.toLocaleString('tr-TR')
 const sentOn = (c: CampaignProgress) =>
   channels.flatMap((ch) => (c.deliveries[ch] ? [{ channel: ch, counts: c.deliveries[ch] }] : []))
@@ -97,9 +101,12 @@ const sentOn = (c: CampaignProgress) =>
         <div v-for="d in sentOn(c)" :key="d.channel" :data-test="`counts-${d.channel}`" class="rounded-md bg-slate-50 p-3">
           <dt class="font-medium text-slate-700">{{ channelNames[d.channel] }} · %{{ channelPercent(d.counts) }}</dt>
           <dd class="mt-1 flex flex-wrap gap-x-4 tabular-nums text-slate-600">
-            <span>Bekleyen {{ formatCount(d.counts.pending) }}</span>
+            <span v-if="showPending(c, d.counts)">Bekleyen {{ formatCount(d.counts.pending) }}</span>
             <span class="text-emerald-700">Gönderildi {{ formatCount(d.counts.sent) }}</span>
             <span class="text-red-700">Başarısız {{ formatCount(d.counts.failed) }}</span>
+            <span v-if="c.status === 'cancelled' || d.counts.cancelled" class="text-slate-500">
+              İptal edildi {{ formatCount(d.counts.cancelled ?? 0) }}
+            </span>
           </dd>
         </div>
       </dl>

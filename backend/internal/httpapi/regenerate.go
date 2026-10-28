@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"slices"
-	"strconv"
 
 	"campaigncomposer/internal/content"
 	"campaigncomposer/internal/llm"
@@ -20,9 +18,8 @@ import (
 // instruction of a regeneration request, writing the error response itself
 // when it can't. Only a draft Campaign can be regenerated.
 func (s *server) regenerationTarget(w http.ResponseWriter, r *http.Request) (storedCampaign, string, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+	id, ok := campaignID(w, r)
+	if !ok {
 		return storedCampaign{}, "", false
 	}
 	var req struct {
@@ -34,7 +31,7 @@ func (s *server) regenerationTarget(w http.ResponseWriter, r *http.Request) (sto
 	}
 	c, err := s.loadCampaign(r.Context(), id)
 	if errors.Is(err, errCampaignNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": campaignNotFound})
 		return c, "", false
 	}
 	if err != nil {
@@ -42,26 +39,13 @@ func (s *server) regenerationTarget(w http.ResponseWriter, r *http.Request) (sto
 		return c, "", false
 	}
 	if c.status != "draft" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": notDraftRegeneration})
 		return c, "", false
 	}
 	return c, req.Instruction, true
 }
 
-// markGeneration marks a regeneration as running, so approval waits for it
-// (see beginGeneration), writing the error response itself when it can't.
-func (s *server) markGeneration(w http.ResponseWriter, r *http.Request, id int64) (func(), bool) {
-	end, err := s.beginGeneration(r.Context(), id)
-	if errors.Is(err, errNotDraft) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
-		return nil, false
-	}
-	if err != nil {
-		writeError(w, err)
-		return nil, false
-	}
-	return end, true
-}
+const notDraftRegeneration = "Yalnızca taslak kampanya yeniden üretilebilir."
 
 // regenerateContent asks Claude to rewrite one Channel's Content, with the
 // Marketer's optional instruction, and streams it over SSE like the first
@@ -79,12 +63,12 @@ func (s *server) regenerateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	endGeneration, ok := s.markGeneration(w, r, c.id)
+	endGeneration, ok := s.trackGeneration(w, r, c.id, notDraftRegeneration)
 	if !ok {
 		return
 	}
 	defer endGeneration()
-	stored, _, err := s.storedContent(ctx, c.id)
+	stored, err := readContent(ctx, s.pool, c.id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -94,7 +78,7 @@ func (s *server) regenerateContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	longest, err := s.longest(ctx, c.rule)
+	longest, err := longestValues(ctx, s.pool, c.rule)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -152,7 +136,9 @@ type regeneratedSegment struct {
 }
 
 // regenerateSegment asks Claude for a new Segment Rule, with the Marketer's
-// optional instruction, through the same repair loop as the first one. The
+// optional instruction, through the same repair loop as the first one, and
+// streams it over SSE like the first one: segment.repair notices, then
+// segment.done with the Campaign, or an error event. The
 // Content is never regenerated: it is kept as it is, the Marketer's edits
 // included, and only validated again against the new Audience's longest
 // placeholder values, so Content that no longer fits comes back flagged. A
@@ -163,7 +149,7 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	endGeneration, ok := s.markGeneration(w, r, c.id)
+	endGeneration, ok := s.trackGeneration(w, r, c.id, notDraftRegeneration)
 	if !ok {
 		return
 	}
@@ -182,34 +168,31 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	sse, ok := startSSE(w)
+	if !ok {
+		writeError(w, errors.New("response writer cannot flush"))
+		return
+	}
 
 	proposal, repairs, err := s.proposeSegment(ctx, llm.SegmentRequest{
 		Brief:      c.brief,
 		Regenerate: &llm.Regeneration{Instruction: instruction, Current: string(current)},
-	})
-	if errors.Is(err, errRepairsExhausted) {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": segmentFailed, "retryable": true})
-		return
-	}
+	}, func(n repairNotice) { sse.send("segment.repair", n) })
 	if err != nil {
-		writeError(w, err)
+		sse.fail("regenerate Segment Rule", err, segmentFailed, true)
 		return
 	}
+	const saveFailed = "Hedef kitle kaydedilemedi. Lütfen tekrar deneyin."
 	ruleJSON, err := json.Marshal(proposal.Rule)
 	if err != nil {
-		writeError(w, err)
+		sse.fail("encode Segment Rule", err, saveFailed, true)
 		return
 	}
 	out := regeneratedSegment{campaignView: campaignView{
-		ID: c.id, Status: c.status, Brief: c.brief, Repairs: repairs,
-		Segment: segmentView{
-			Rule:                proposal.Rule,
-			Labels:              segment.Labels(proposal.Rule),
-			UnsupportedCriteria: proposal.UnsupportedCriteria,
-		},
+		ID: c.id, Status: c.status, Brief: c.brief, Repairs: repairs, Segment: newSegmentView(proposal),
 	}}
 	if out.Audience, err = segment.CountAudience(ctx, s.pool, proposal.Rule); err != nil {
-		writeError(w, fmt.Errorf("count audience: %w", err))
+		sse.fail("count audience", err, saveFailed, true)
 		return
 	}
 	out.DisabledChannels = disabledChannels(out.Audience)
@@ -219,54 +202,27 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 			enabled_channels = ARRAY(SELECT ch FROM unnest(enabled_channels) AS ch WHERE ch = ANY ($4))
 		WHERE id = $1 AND status = 'draft'`,
 		c.id, ruleJSON, proposal.UnsupportedCriteria, withAudience(content.Channels, out.Audience))
-	if err != nil {
-		writeError(w, err)
+	if err == nil && tag.RowsAffected() == 0 {
+		sse.fail("regenerate Segment Rule", errors.New("campaign is no longer a draft"),
+			notDraftRegeneration, false)
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanya yeniden üretilebilir."})
+	if err != nil {
+		sse.fail("save Segment Rule", err, saveFailed, true)
 		return
 	}
-	longest, err := s.longest(ctx, proposal.Rule)
+	longest, err := longestValues(ctx, s.pool, proposal.Rule)
 	if err != nil {
-		writeError(w, err)
+		sse.fail("longest placeholder values", err, "İçerik doğrulanamadı. Lütfen sayfayı yenileyin.", false)
 		return
 	}
 	state, err := s.contentState(ctx, c.id, longest)
 	if err != nil {
-		writeError(w, err)
+		sse.fail("read content", err, "İçerik okunamadı. Lütfen sayfayı yenileyin.", false)
 		return
 	}
 	out.EnabledChannels, out.Content, out.Validation = state.EnabledChannels, state.Content, state.Validation
-	writeJSON(w, http.StatusOK, out)
-}
-
-// storedContent reads a Campaign's Content and enabled Channels.
-func (s *server) storedContent(ctx context.Context, id int64) (contentView, []string, error) {
-	var v contentView
-	var enabled []string
-	if err := s.pool.QueryRow(ctx, `SELECT enabled_channels FROM campaigns WHERE id = $1`, id).Scan(&enabled); err != nil {
-		return v, nil, err
-	}
-	rows, err := s.pool.Query(ctx, `SELECT channel, subject, preheader, body, cta_text FROM contents WHERE campaign_id = $1`, id)
-	if err != nil {
-		return v, nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var channel string
-		var e content.Email
-		if err := rows.Scan(&channel, &e.Subject, &e.Preheader, &e.Body, &e.CTAText); err != nil {
-			return v, nil, err
-		}
-		switch channel {
-		case "sms":
-			v.SMS = &content.SMS{Body: e.Body}
-		case "email":
-			v.Email = &e
-		}
-	}
-	return v, enabled, rows.Err()
+	sse.send("segment.done", out)
 }
 
 // channelJSON is one Channel's Content as JSON, or "" if it has none.
@@ -286,17 +242,14 @@ func (v contentView) channelJSON(channel string) (string, error) {
 
 // contentState is the Campaign's stored Content, validated against the
 // longest placeholder values of its Audience.
-func (s *server) contentState(ctx context.Context, id int64, longest content.Longest) (contentDone, error) {
-	v, enabled, err := s.storedContent(ctx, id)
+func (s *server) contentState(ctx context.Context, id int64, longest content.LongestValues) (contentDone, error) {
+	var enabled []string
+	if err := s.pool.QueryRow(ctx, `SELECT enabled_channels FROM campaigns WHERE id = $1`, id).Scan(&enabled); err != nil {
+		return contentDone{}, err
+	}
+	v, err := readContent(ctx, s.pool, id)
 	if err != nil {
 		return contentDone{}, err
 	}
-	p := content.Proposal{SMS: v.SMS, Email: v.Email}
-	if v.SMS != nil {
-		p.Channels = append(p.Channels, "sms")
-	}
-	if v.Email != nil {
-		p.Channels = append(p.Channels, "email")
-	}
-	return contentDone{EnabledChannels: enabled, Content: v, Validation: content.Validate(p, longest)}, nil
+	return contentDone{EnabledChannels: enabled, Content: v, Validation: content.Validate(v.proposal(v.channels()), longest)}, nil
 }

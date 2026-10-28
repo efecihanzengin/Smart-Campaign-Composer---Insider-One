@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Channel, EmailContent, Length, Validation } from '../api'
+import { channels, type Channel, type EmailContent, type Length, type Validation } from '../api'
 import { useCampaignStore } from '../stores/campaign'
 import RegenerateControl from './RegenerateControl.vue'
 
@@ -43,7 +43,7 @@ const emailFields: { field: keyof EmailContent; test: string; label: string; mul
 // Audience after the Segment Rule changed.
 const noLongerFits = computed(() =>
   store.revalidated
-    ? (['sms', 'email'] as Channel[]).filter((c) => store.content[c] && store.validation[c]?.valid === false)
+    ? channels.filter((c) => store.content[c] && store.validation[c]?.valid === false)
     : [],
 )
 
@@ -84,7 +84,7 @@ const fieldNames: Record<string, string> = {
 
     <fieldset class="flex flex-wrap gap-4">
       <legend class="sr-only">Kanallar</legend>
-      <label v-for="c in (['sms', 'email'] as Channel[])" :key="c" class="flex items-center gap-2 text-sm">
+      <label v-for="c in channels" :key="c" class="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
           :data-test="`channel-${c}`"

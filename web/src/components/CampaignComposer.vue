@@ -41,6 +41,17 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
       </button>
     </form>
 
+    <p
+      v-if="store.segmentRepairing"
+      data-test="segment-repairing"
+      role="status"
+      class="rounded-md bg-amber-50 p-3 text-sm text-amber-800"
+    >
+      Kurallara uymayan hedef kitle kuralı düzeltiliyor ({{ store.segmentRepairing.repair }}/{{
+        store.segmentRepairing.max
+      }})…
+    </p>
+
     <div
       v-if="store.error"
       data-test="campaign-error"

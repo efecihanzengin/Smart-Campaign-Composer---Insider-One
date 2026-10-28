@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"campaigncomposer/internal/httpapi"
@@ -47,6 +48,54 @@ func postJSON(t *testing.T, url string, body, into any) int {
 	return res.StatusCode
 }
 
+// streamSegment POSTs body to a Segment Rule generation endpoint and returns
+// every SSE event, failing the test unless the stream opened.
+func streamSegment(t *testing.T, url string, body any) []sseEvent {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.Post(url, "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer res.Body.Close()
+	if ct := res.Header.Get("Content-Type"); res.StatusCode != http.StatusOK || !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("POST %s: status code %d, Content-Type %q; want a 200 event stream", url, res.StatusCode, ct)
+	}
+	return readSSE(t, res.Body)
+}
+
+// segmentDone decodes the stream's final segment.done event into into.
+func segmentDone(t *testing.T, events []sseEvent, into any) {
+	t.Helper()
+	if len(events) == 0 || events[len(events)-1].Name != "segment.done" {
+		t.Fatalf("stream did not end with segment.done: %s", eventNames(events))
+	}
+	if err := json.Unmarshal(events[len(events)-1].Data, into); err != nil {
+		t.Fatalf("decode segment.done: %v", err)
+	}
+}
+
+type streamFailure struct {
+	Error     string `json:"error"`
+	Retryable bool   `json:"retryable"`
+}
+
+// lastError decodes the stream's final error event.
+func lastError(t *testing.T, events []sseEvent) streamFailure {
+	t.Helper()
+	if len(events) == 0 || events[len(events)-1].Name != "error" {
+		t.Fatalf("stream did not end with an error: %s", eventNames(events))
+	}
+	var e streamFailure
+	if err := json.Unmarshal(events[len(events)-1].Data, &e); err != nil {
+		t.Fatalf("decode error event: %v", err)
+	}
+	return e
+}
+
 // scriptedSegment returns a mock LLM whose Segment call always answers with raw.
 func scriptedSegment(raw string) *llm.Mock {
 	return &llm.Mock{SegmentFunc: func(context.Context, llm.SegmentRequest) (json.RawMessage, error) {
@@ -57,10 +106,7 @@ func scriptedSegment(raw string) *llm.Mock {
 func TestExampleBriefYieldsSegmentRuleAndPerChannelAudience(t *testing.T) {
 	srv, pool := startAPIWithPool(t, httpapi.Options{MockLLM: true, LLM: llm.NewMock()})
 
-	var c campaign
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}, &c); code != http.StatusCreated {
-		t.Fatalf("status code = %d, want 201", code)
-	}
+	c := createCampaign(t, srv.URL, exampleBrief)
 	if c.ID == 0 || c.Status != "draft" || c.Brief != exampleBrief {
 		t.Errorf("campaign = {id %d, status %q, brief %q}, want a draft with the Brief", c.ID, c.Status, c.Brief)
 	}
@@ -102,10 +148,7 @@ func TestUnsupportedCriteriaComeBackAsAWarning(t *testing.T) {
 		"unsupported_criteria": ["ayakkabı satın alanlar"]
 	}`)})
 
-	var c campaign
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": "Ankara'da ayakkabı alanlara yaz"}, &c); code != http.StatusCreated {
-		t.Fatalf("status code = %d, want 201", code)
-	}
+	c := createCampaign(t, srv.URL, "Ankara'da ayakkabı alanlara yaz")
 	if !slices.Equal(c.Segment.UnsupportedCriteria, []string{"ayakkabı satın alanlar"}) {
 		t.Errorf("unsupported_criteria = %q, want [ayakkabı satın alanlar]", c.Segment.UnsupportedCriteria)
 	}
@@ -120,12 +163,9 @@ func TestSegmentRuleThatReferencesConsentIsRejected(t *testing.T) {
 		"unsupported_criteria": []
 	}`)})
 
-	var body struct{ Error string }
-	if code := postJSON(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}, &body); code != http.StatusBadGateway {
-		t.Fatalf("status code = %d, want 502", code)
-	}
-	if body.Error == "" {
-		t.Error("error message is empty")
+	failure := lastError(t, streamSegment(t, srv.URL+"/api/campaigns", map[string]string{"brief": exampleBrief}))
+	if failure.Error == "" || !failure.Retryable {
+		t.Errorf("error = %+v, want a retryable error message", failure)
 	}
 }
 

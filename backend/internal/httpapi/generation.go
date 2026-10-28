@@ -4,39 +4,66 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// generationTimeout is how long a started generation call blocks approval. A
-// mark older than this is stale: the process running the call died.
-const generationTimeout = 5 * time.Minute
+// generationTTL is how long a generation's claim to block approval lasts
+// without a heartbeat: three heartbeats, so one slow renewal doesn't drop it.
+func (s *server) generationTTL() time.Duration { return 3 * s.opts.GenerationHeartbeat }
 
-var errNotDraft = errors.New("campaign is not a draft")
-
-// beginGeneration marks a generation call for a draft Campaign as running, so
-// approval is refused until it ends, and returns the function that ends it.
-// The mark is set only while the Campaign is a draft, under the row lock
-// approval takes, so a call can't start on an approved Campaign either.
-func (s *server) beginGeneration(ctx context.Context, id int64) (end func(), err error) {
-	var started time.Time
-	err = s.pool.QueryRow(ctx, `UPDATE campaigns SET generation_started_at = clock_timestamp()
-		WHERE id = $1 AND status = 'draft' RETURNING generation_started_at`, id).Scan(&started)
+// trackGeneration registers a generation call for a draft Campaign, so
+// approval is refused while it runs, and returns the function that ends it.
+// While the call runs its registration is renewed every heartbeat, so a call
+// of any length keeps blocking approval; one whose api process died expires
+// within three heartbeats. The registration is added only while the Campaign
+// is a draft, under a share lock that waits for an approval holding the row,
+// so a call can't start on an approved Campaign either. If it can't register,
+// it writes the error response itself (notDraft when the Campaign is no
+// longer a draft) and returns false.
+func (s *server) trackGeneration(w http.ResponseWriter, r *http.Request, id int64, notDraft string) (end func(), ok bool) {
+	ctx := r.Context()
+	ttl := s.generationTTL()
+	var gen int64
+	err := s.pool.QueryRow(ctx, `INSERT INTO generations (campaign_id, expires_at)
+		SELECT id, clock_timestamp() + make_interval(secs => $2) FROM campaigns WHERE id = $1 AND status = 'draft' FOR SHARE
+		RETURNING id`, id, ttl.Seconds()).Scan(&gen)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errNotDraft
+		writeJSON(w, http.StatusConflict, map[string]string{"error": notDraft})
+		return nil, false
 	}
 	if err != nil {
-		return nil, err
+		writeError(w, err)
+		return nil, false
 	}
+
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(s.opts.GenerationHeartbeat)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+			}
+			if _, err := s.pool.Exec(context.Background(), `UPDATE generations
+				SET expires_at = clock_timestamp() + make_interval(secs => $2) WHERE id = $1`, gen, ttl.Seconds()); err != nil {
+				log.Printf("renew generation of campaign %d: %v", id, err)
+			}
+		}
+	}()
 	return func() {
-		// Only this call's own mark is cleared: a call started meanwhile keeps
-		// blocking approval until it ends too.
+		close(stop)
+		<-stopped
+		// Expired registrations of crashed calls go too.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := s.pool.Exec(ctx, `UPDATE campaigns SET generation_started_at = NULL
-			WHERE id = $1 AND generation_started_at = $2`, id, started); err != nil {
+		if _, err := s.pool.Exec(ctx, `DELETE FROM generations WHERE id = $1 OR expires_at < now()`, gen); err != nil {
 			log.Printf("end generation of campaign %d: %v", id, err)
 		}
-	}, nil
+	}, true
 }

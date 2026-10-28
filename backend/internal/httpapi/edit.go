@@ -4,55 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
 
 	"campaigncomposer/internal/content"
-	"campaigncomposer/internal/segment"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
-
-// storedCampaign is what validation and regeneration need of a Campaign.
-type storedCampaign struct {
-	id     int64
-	brief  string
-	status string
-	rule   segment.Node
-}
-
-var errCampaignNotFound = errors.New("campaign not found")
-
-// loadCampaign reads a Campaign's Brief, status and Segment Rule.
-func (s *server) loadCampaign(ctx context.Context, id int64) (storedCampaign, error) {
-	c := storedCampaign{id: id}
-	var ruleJSON []byte
-	err := s.pool.QueryRow(ctx, `SELECT brief, status, segment_rule FROM campaigns WHERE id = $1`, id).
-		Scan(&c.brief, &c.status, &ruleJSON)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return c, errCampaignNotFound
-	}
-	if err != nil {
-		return c, err
-	}
-	c.rule, err = storedRule(ruleJSON)
-	return c, err
-}
-
-// longest finds the longest placeholder values in each Channel's Audience.
-func (s *server) longest(ctx context.Context, rule segment.Node) (content.Longest, error) {
-	sms, email, err := segment.LongestValues(ctx, s.pool, rule)
-	if err != nil {
-		return content.Longest{}, fmt.Errorf("longest placeholder values: %w", err)
-	}
-	return content.Longest{
-		SMS:   content.Sample{FirstName: sms.FirstName, City: sms.City},
-		Email: content.Sample{FirstName: email.FirstName, City: email.City},
-	}, nil
-}
 
 // contentRequest reads a Campaign and a Channel's Content from an edit or
 // validate request, writing the error response itself when it can't.
@@ -74,7 +33,7 @@ func (s *server) contentRequest(w http.ResponseWriter, r *http.Request) (storedC
 	}
 	c, err := s.loadCampaign(r.Context(), id)
 	if errors.Is(err, errCampaignNotFound) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": campaignNotFound})
 		return c, p, false
 	}
 	if err != nil {
@@ -88,7 +47,7 @@ func (s *server) contentRequest(w http.ResponseWriter, r *http.Request) (storedC
 // Campaign's current Audience. The live counters and inline edits use it, so
 // the rules exist only in the backend (ADR-0002).
 func (s *server) validate(ctx context.Context, c storedCampaign, p content.Proposal) (content.Validation, error) {
-	longest, err := s.longest(ctx, c.rule)
+	longest, err := longestValues(ctx, s.pool, c.rule)
 	if err != nil {
 		return content.Validation{}, err
 	}

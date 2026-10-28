@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import CampaignComposer from './CampaignComposer.vue'
+import { openStream, sse } from '../testing/sse'
 
 const exampleBrief =
   "Son 30 günde sepetine ürün ekleyip alışveriş yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
@@ -20,13 +21,17 @@ function campaign(overrides: { unsupported_criteria?: string[] } = {}) {
   }
 }
 
-function mockCreate(body: unknown, status = 201) {
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }),
-  )
+// mockFetch answers the Segment call with response (a fresh one per call).
+function mockFetch(response: () => Response) {
+  const fetchMock = vi.fn(async () => response())
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
+
+// mockCreate streams the created Campaign as the Segment call's result.
+const mockCreate = (body: unknown) => mockFetch(() => sse(['segment.done', body]))
+
+const failedCall = { error: 'Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin.', retryable: true }
 
 async function submitBrief(brief = exampleBrief) {
   const wrapper = mount(CampaignComposer, { global: { plugins: [createPinia()] } })
@@ -61,7 +66,8 @@ describe('CampaignComposer', () => {
     const wrapper = await submitBrief()
 
     expect(fetchMock).toHaveBeenCalledWith('/api/campaigns', expect.objectContaining({ method: 'POST' }))
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ brief: exampleBrief })
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(String(init.body))).toEqual({ brief: exampleBrief })
     expect(wrapper.findAll('[data-test="segment-label"]').map((l) => l.text())).toEqual([
       'Şehir: İstanbul',
       'Son 30 günde sepete ekledi',
@@ -98,37 +104,61 @@ describe('CampaignComposer', () => {
   })
 
   it('shows the API error when generation fails', async () => {
-    mockCreate({ error: 'Model geçersiz bir hedef kitle kuralı üretti. Lütfen tekrar deneyin.' }, 502)
+    mockFetch(() => sse(['error', { error: 'Kampanya kaydedilemedi. Lütfen tekrar deneyin.' }]))
 
     const wrapper = await submitBrief()
 
-    expect(wrapper.get('[data-test="campaign-error"]').text()).toContain('geçersiz bir hedef kitle kuralı')
+    expect(wrapper.get('[data-test="campaign-error"]').text()).toContain('Kampanya kaydedilemedi')
     expect(wrapper.find('[data-test="segment-label"]').exists()).toBe(false)
   })
 
+  it('shows that the Segment Rule is being repaired until the repaired rule arrives', async () => {
+    const stream = openStream()
+    mockFetch(() => stream.response)
+    const wrapper = await submitBrief()
+
+    await stream.send('segment.repair', { repair: 1, max: 2, errors: ['rule.all[0].field: unknown field'] })
+    const indicator = wrapper.get('[data-test="segment-repairing"]')
+    expect(indicator.text()).toContain('1/2')
+    expect(wrapper.get('[data-test="submit"]').attributes('disabled')).toBeDefined()
+
+    await stream.send('segment.done', campaign())
+    await stream.end()
+    expect(wrapper.find('[data-test="segment-repairing"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="segment-label"]')).toHaveLength(3)
+  })
+
   it('offers a retry when the Segment Rule could not be repaired', async () => {
-    const fetchMock = mockCreate(
-      { error: 'Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin.', retryable: true },
-      502,
-    )
+    let answer = () =>
+      sse(['segment.repair', { repair: 1, max: 2, errors: ['x'] }], ['segment.repair', { repair: 2, max: 2, errors: ['x'] }], [
+        'error',
+        failedCall,
+      ])
+    const fetchMock = mockFetch(() => answer())
     const wrapper = await submitBrief()
     expect(wrapper.find('[data-test="segment-label"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="segment-repairing"]').exists()).toBe(false)
+    expect(wrapper.get('[data-test="campaign-error"]').text()).toContain('üretemedi')
 
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify(campaign()), { status: 201, headers: { 'Content-Type': 'application/json' } }),
-    )
+    answer = () => sse(['segment.done', campaign()])
     await wrapper.get('[data-test="campaign-retry"]').trigger('click')
     await flushPromises()
 
-    const creates = fetchMock.mock.calls.filter(([url]) => url === '/api/campaigns')
+    const creates = (fetchMock.mock.calls as unknown as [string, RequestInit][]).filter(([url]) => url === '/api/campaigns')
     expect(creates).toHaveLength(2)
-    expect(JSON.parse(creates[1][1].body)).toEqual({ brief: exampleBrief })
+    expect(JSON.parse(String(creates[1][1].body))).toEqual({ brief: exampleBrief })
     expect(wrapper.find('[data-test="campaign-error"]').exists()).toBe(false)
     expect(wrapper.findAll('[data-test="segment-label"]')).toHaveLength(3)
   })
 
   it('offers no retry for an error that is not retryable', async () => {
-    mockCreate({ error: 'Kampanya talebi boş olamaz.' }, 400)
+    mockFetch(
+      () =>
+        new Response(JSON.stringify({ error: 'Kampanya talebi boş olamaz.' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    )
 
     const wrapper = await submitBrief()
 

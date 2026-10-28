@@ -85,9 +85,7 @@ type contentDelta struct {
 func createCampaign(t *testing.T, baseURL, brief string) campaign {
 	t.Helper()
 	var c campaign
-	if code := postJSON(t, baseURL+"/api/campaigns", map[string]string{"brief": brief}, &c); code != http.StatusCreated {
-		t.Fatalf("create campaign: status code = %d, want 201", code)
-	}
+	segmentDone(t, streamSegment(t, baseURL+"/api/campaigns", map[string]string{"brief": brief}), &c)
 	return c
 }
 

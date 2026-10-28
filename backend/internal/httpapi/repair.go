@@ -19,10 +19,11 @@ import (
 var errRepairsExhausted = errors.New("output still invalid after the maximum number of repairs")
 
 // proposeSegment runs the Segment call inside the validate-and-repair loop
-// (ADR-0005): a failed call or a rejected Segment Rule is sent back to Claude
-// with the validator's message, at most llm.MaxRepairs times. It returns the
-// valid proposal and how many repairs it took.
-func (s *server) proposeSegment(ctx context.Context, req llm.SegmentRequest) (segment.Proposal, int, error) {
+// (ADR-0005): a failed call or a rejected Segment Rule is announced through
+// onRepair and sent back to Claude with the validator's message, at most
+// llm.MaxRepairs times. It returns the valid proposal and how many repairs it
+// took.
+func (s *server) proposeSegment(ctx context.Context, req llm.SegmentRequest, onRepair func(repairNotice)) (segment.Proposal, int, error) {
 	for repairs := 0; ; repairs++ {
 		raw, err := s.opts.LLM.Segment(ctx, req)
 		if ctx.Err() != nil {
@@ -39,6 +40,7 @@ func (s *server) proposeSegment(ctx context.Context, req llm.SegmentRequest) (se
 		if repairs == llm.MaxRepairs {
 			return segment.Proposal{}, repairs, fmt.Errorf("%w: %v", errRepairsExhausted, err)
 		}
+		onRepair(repairNotice{Repair: repairs + 1, Max: llm.MaxRepairs, Errors: []string{err.Error()}})
 		req.Repair = &llm.Repair{Previous: string(raw), Errors: []string{err.Error()}}
 	}
 }
@@ -55,7 +57,7 @@ type repairNotice struct {
 // streams; a failed call, malformed JSON or Content the validator rejects is
 // announced through onRepair and sent back to Claude, at most llm.MaxRepairs
 // times. It returns valid Content, its validation and the repairs it took.
-func (s *server) proposeContent(ctx context.Context, req llm.ContentRequest, longest content.Longest,
+func (s *server) proposeContent(ctx context.Context, req llm.ContentRequest, longest content.LongestValues,
 	onDelta func(content.Proposal), onRepair func(repairNotice)) (content.Proposal, map[string]content.Validation, int, error) {
 	for repairs := 0; ; repairs++ {
 		var raw strings.Builder

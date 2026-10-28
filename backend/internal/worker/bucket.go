@@ -26,7 +26,6 @@ const (
 // limit by a fifth of the limit per second.
 type Bucket struct {
 	limit float64
-	now   func() time.Time
 
 	mu      sync.Mutex
 	tokens  float64
@@ -36,13 +35,9 @@ type Bucket struct {
 	last429 time.Time
 }
 
-// NewBucket returns a Bucket allowing limit requests per second. now is the
-// clock; nil means time.Now.
-func NewBucket(limit float64, now func() time.Time) *Bucket {
-	if now == nil {
-		now = time.Now
-	}
-	return &Bucket{limit: limit, now: now, tokens: 1, last: now(), base: limit}
+// NewBucket returns a Bucket allowing limit requests per second.
+func NewBucket(limit float64) *Bucket {
+	return &Bucket{limit: limit, tokens: 1, last: time.Now(), base: limit}
 }
 
 // Wait blocks until the caller may make one request, or ctx ends.
@@ -66,7 +61,7 @@ func (b *Bucket) Wait(ctx context.Context) error {
 func (b *Bucket) Reserve() time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := b.now()
+	now := time.Now()
 	rate := b.rateAt(now)
 	b.tokens = math.Min(1, b.tokens+now.Sub(b.last).Seconds()*rate)
 	b.last = now
@@ -81,7 +76,7 @@ func (b *Bucket) Reserve() time.Duration {
 func (b *Bucket) Observe429() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	now := b.now()
+	now := time.Now()
 	if b.lastCut.IsZero() || now.Sub(b.lastCut) >= cooldown {
 		b.base = math.Max(minRate, b.rateAt(now)/2)
 		b.lastCut = now
@@ -93,7 +88,7 @@ func (b *Bucket) Observe429() {
 func (b *Bucket) Rate() float64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.rateAt(b.now())
+	return b.rateAt(time.Now())
 }
 
 func (b *Bucket) rateAt(now time.Time) float64 {

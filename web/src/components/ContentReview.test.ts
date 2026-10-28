@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import CampaignComposer from './CampaignComposer.vue'
+import { sse } from '../testing/sse'
 
 const campaign = {
   id: 7,
@@ -34,7 +35,7 @@ function mockApi(previewHtml = '<p>önizleme</p>', validator: Validator = always
   let stream!: ReadableStreamDefaultController<Uint8Array>
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { 'Content-Type': 'application/json' } })
-    if (url === '/api/campaigns') return json(campaign)
+    if (url === '/api/campaigns') return sse(['segment.done', campaign])
     if (url === '/api/campaigns/7/content') {
       const body = new ReadableStream<Uint8Array>({ start: (c) => void (stream = c) })
       return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })

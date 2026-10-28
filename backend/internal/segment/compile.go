@@ -102,6 +102,7 @@ type Audience struct {
 
 // Querier is satisfied by a pool, a connection or a transaction.
 type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 

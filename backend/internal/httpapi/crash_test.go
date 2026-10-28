@@ -219,7 +219,7 @@ func TestDeliveriesHeldByAKilledWorkerAreCompletedByAnotherAfterTheirLease(t *te
 	crashed.kill()
 	holding.Store(false)
 
-	held := campaignDeliveries(t, baseURL, c.ID, "sending")
+	held := campaignDeliveries(t, pool, c.ID, "sending")
 	if len(held) != 20 {
 		t.Fatalf("after the kill %d Deliveries are sending, want the 20 in flight", len(held))
 	}
@@ -232,10 +232,8 @@ func TestDeliveriesHeldByAKilledWorkerAreCompletedByAnotherAfterTheirLease(t *te
 	msgs := providerMessages(t, prov.URL)
 	assertZeroDuplicates(t, baseURL, pool, c.ID, msgs)
 	sent := map[int64]deliveryWithAttempts{}
-	for _, ch := range []string{"sms", "email"} {
-		for _, d := range campaignDeliveries(t, baseURL, c.ID, "sent&limit=500&channel="+ch) {
-			sent[d.ID] = d
-		}
+	for _, d := range campaignDeliveries(t, pool, c.ID, "sent") {
+		sent[d.ID] = d
 	}
 	for _, h := range held {
 		d := sent[h.ID]
@@ -298,7 +296,7 @@ func TestAWorkerStoppedMidSendHandsItsDeliveriesBackWithoutWaitingForTheLease(t 
 	holding.Store(false)
 	inFlight := first.keys()
 
-	if s := campaignDeliveries(t, baseURL, c.ID, "sending"); len(s) != 0 {
+	if s := campaignDeliveries(t, pool, c.ID, "sending"); len(s) != 0 {
 		t.Fatalf("after a graceful stop %d Deliveries are still sending, want none", len(s))
 	}
 	startWorkersWith(t, pool, opts, 1)
@@ -310,23 +308,14 @@ func TestAWorkerStoppedMidSendHandsItsDeliveriesBackWithoutWaitingForTheLease(t 
 	assertZeroDuplicates(t, baseURL, pool, c.ID, providerMessages(t, prov.URL))
 	// The cut-off request is logged as an Attempt without a response; the
 	// Deliveries that were claimed but not yet requested lost no Attempt.
-	for _, ch := range []string{"sms", "email"} {
-		for _, d := range campaignDeliveries(t, baseURL, c.ID, "sent&limit=10&channel="+ch) {
-			if !inFlight[ch+"/"+strconv.FormatInt(d.ID, 10)] {
-				continue
-			}
+	for _, d := range campaignDeliveries(t, pool, c.ID, "sent") {
+		if inFlight[d.Channel+"/"+strconv.FormatInt(d.ID, 10)] {
 			if len(d.Attempts) != 2 || d.Attempts[0].StatusCode != nil || d.Attempts[0].Outcome != "retry" ||
 				d.Attempts[0].Error == "" || d.Attempts[1].Outcome != "sent" {
 				t.Errorf("Delivery %d Attempts = %+v, want a cut-off retry then sent", d.ID, d.Attempts)
 			}
-		}
-		for _, d := range campaignDeliveries(t, baseURL, c.ID, "sent&limit=500&channel="+ch) {
-			if inFlight[ch+"/"+strconv.FormatInt(d.ID, 10)] {
-				continue
-			}
-			if d.AttemptCount != 1 || len(d.Attempts) != 1 {
-				t.Errorf("Delivery %d: %d Attempts (%d logged), want 1", d.ID, d.AttemptCount, len(d.Attempts))
-			}
+		} else if d.AttemptCount != 1 || len(d.Attempts) != 1 {
+			t.Errorf("Delivery %d: %d Attempts (%d logged), want 1", d.ID, d.AttemptCount, len(d.Attempts))
 		}
 	}
 }

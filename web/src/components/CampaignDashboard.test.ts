@@ -150,6 +150,46 @@ describe('Campaign dashboard', () => {
     expect(counts(wrapper, 7, 'sms')).toContain('Gönderildi 112')
   })
 
+  it("shows a cancelled Campaign's final breakdown, with the unsent Deliveries as cancelled, not pending", async () => {
+    const wrapper = mount(CampaignDashboard)
+    await source().emit('dashboard', {
+      campaigns: [
+        campaign({
+          status: 'cancelled',
+          deliveries: {
+            sms: { pending: 0, sent: 112, failed: 3, cancelled: 297, total: 412 },
+            email: { pending: 0, sent: 534, failed: 0, cancelled: 1000, total: 1534 },
+          },
+          progress: 1,
+        }),
+      ],
+    })
+
+    expect(counts(wrapper, 7, 'sms')).toContain('Gönderildi 112')
+    expect(counts(wrapper, 7, 'sms')).toContain('Başarısız 3')
+    expect(counts(wrapper, 7, 'sms')).toContain('İptal edildi 297')
+    expect(counts(wrapper, 7, 'sms')).not.toContain('Bekleyen')
+    expect(counts(wrapper, 7, 'email')).toContain('İptal edildi 1.000')
+    expect(counts(wrapper, 7, 'sms')).toContain('SMS · %100')
+    expect(bar(wrapper, 7).attributes('aria-valuenow')).toBe('100')
+  })
+
+  it('keeps counting Deliveries still in flight after a cancel as pending', async () => {
+    const wrapper = mount(CampaignDashboard)
+    await source().emit('dashboard', {
+      campaigns: [
+        campaign({
+          status: 'cancelled',
+          deliveries: { sms: { pending: 5, sent: 107, failed: 0, cancelled: 300, total: 412 } },
+          progress: 407 / 412,
+        }),
+      ],
+    })
+
+    expect(counts(wrapper, 7, 'sms')).toContain('Bekleyen 5')
+    expect(counts(wrapper, 7, 'sms')).toContain('İptal edildi 300')
+  })
+
   it('shows why a cancel was refused', async () => {
     vi.stubGlobal(
       'fetch',

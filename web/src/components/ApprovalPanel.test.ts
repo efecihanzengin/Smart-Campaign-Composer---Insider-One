@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import CampaignComposer from './CampaignComposer.vue'
+import { sse } from '../testing/sse'
 
 const sms = { body: 'Merhaba {{first_name}}, sepetin seni bekliyor!' }
 const email = { subject: 'İndirim', preheader: 'Sepetin hâlâ orada', body: 'Merhaba {{first_name}}', cta_text: '' }
@@ -38,7 +39,7 @@ function mockApi(opts: Options = {}) {
   let stream!: ReadableStreamDefaultController<Uint8Array>
   const body = new ReadableStream<Uint8Array>({ start: (c) => void (stream = c) })
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url === '/api/campaigns') return json(campaign)
+    if (url === '/api/campaigns') return sse(['segment.done', campaign])
     if (url === '/api/campaigns/7/content') return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
     if (url === '/api/email/preview') return new Response('<p>önizleme</p>', { headers: { 'Content-Type': 'text/html' } })
     if (url === '/api/campaigns/7/approve' && init?.method === 'POST') {

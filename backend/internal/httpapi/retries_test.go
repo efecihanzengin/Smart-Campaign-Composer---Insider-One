@@ -1,6 +1,8 @@
 package httpapi_test
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,8 @@ import (
 
 	"campaigncomposer/internal/provider"
 	"campaigncomposer/internal/worker"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // startScriptedProvider serves the mock Provider with every request's
@@ -54,17 +58,36 @@ type deliveryWithAttempts struct {
 }
 
 // campaignDeliveries lists the Campaign's Deliveries in state with their
-// Attempt log.
-func campaignDeliveries(t *testing.T, baseURL string, id int64, state string) []deliveryWithAttempts {
+// Attempt log, the record an operator reads to explain a Delivery (story 67).
+func campaignDeliveries(t *testing.T, pool *pgxpool.Pool, id int64, state string) []deliveryWithAttempts {
 	t.Helper()
-	var out struct {
-		Deliveries []deliveryWithAttempts `json:"deliveries"`
+	rows, err := pool.Query(context.Background(), `
+		SELECT d.id, d.channel, d.state, d.attempt_count,
+			COALESCE((SELECT json_agg(json_build_object(
+					'number', a.number, 'status_code', a.status_code, 'latency_ms', a.latency_ms,
+					'error', a.error, 'outcome', a.outcome, 'at', a.started_at) ORDER BY a.number, a.id)
+				FROM attempts a WHERE a.delivery_id = d.id), '[]')
+		FROM deliveries d WHERE d.campaign_id = $1 AND d.state = $2 ORDER BY d.id`, id, state)
+	if err != nil {
+		t.Fatal(err)
 	}
-	url := baseURL + "/api/campaigns/" + strconv.FormatInt(id, 10) + "/deliveries?state=" + state
-	if code := getJSON(t, url, &out); code != http.StatusOK {
-		t.Fatalf("GET %s: status code %d", url, code)
+	defer rows.Close()
+	var out []deliveryWithAttempts
+	for rows.Next() {
+		var d deliveryWithAttempts
+		var attempts []byte
+		if err := rows.Scan(&d.ID, &d.Channel, &d.State, &d.AttemptCount, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(attempts, &d.Attempts); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, d)
 	}
-	return out.Deliveries
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestThrottledThenFailingThenAcceptedSendIsSentAfterThreeAttemptsHonouringRetryAfter(t *testing.T) {
@@ -88,7 +111,7 @@ func TestThrottledThenFailingThenAcceptedSendIsSentAfterThreeAttemptsHonouringRe
 	if got.Deliveries["sms"].Sent != c.Audience.SMS || got.Deliveries["email"].Sent != c.Audience.Email {
 		t.Fatalf("Deliveries = %+v, want all sent", got.Deliveries)
 	}
-	sent := campaignDeliveries(t, baseURL, c.ID, "sent")
+	sent := campaignDeliveries(t, pool, c.ID, "sent")
 	if len(sent) == 0 {
 		t.Fatal("no sent Deliveries listed")
 	}
@@ -111,13 +134,13 @@ func TestThrottledThenFailingThenAcceptedSendIsSentAfterThreeAttemptsHonouringRe
 
 // assertAllFailedAfter checks that every Delivery of the Campaign failed
 // after n Attempts, each logged with wantCode, the last one as `failed`.
-func assertAllFailedAfter(t *testing.T, baseURL string, c campaign, n, wantCode int) {
+func assertAllFailedAfter(t *testing.T, baseURL string, pool *pgxpool.Pool, c campaign, n, wantCode int) {
 	t.Helper()
 	got := waitForStatus(t, baseURL, c.ID, "completed")
 	if got.Deliveries["sms"].Failed != c.Audience.SMS || got.Deliveries["email"].Failed != c.Audience.Email {
 		t.Fatalf("Deliveries = %+v, want all failed", got.Deliveries)
 	}
-	failed := campaignDeliveries(t, baseURL, c.ID, "failed")
+	failed := campaignDeliveries(t, pool, c.ID, "failed")
 	if len(failed) == 0 {
 		t.Fatal("no failed Deliveries listed")
 	}
@@ -148,7 +171,7 @@ func TestFiveRetryableFailuresInARowFailTheDelivery(t *testing.T) {
 		t.Fatalf("approve: status code %d, body %+v", code, a)
 	}
 
-	assertAllFailedAfter(t, baseURL, c, 5, http.StatusBadGateway)
+	assertAllFailedAfter(t, baseURL, pool, c, 5, http.StatusBadGateway)
 }
 
 func TestAPermanentClientErrorFailsTheDeliveryAfterOneAttempt(t *testing.T) {
@@ -162,7 +185,7 @@ func TestAPermanentClientErrorFailsTheDeliveryAfterOneAttempt(t *testing.T) {
 		t.Fatalf("approve: status code %d, body %+v", code, a)
 	}
 
-	assertAllFailedAfter(t, baseURL, c, 1, http.StatusUnprocessableEntity)
+	assertAllFailedAfter(t, baseURL, pool, c, 1, http.StatusUnprocessableEntity)
 }
 
 func TestASendThatTimesOutAfterTheProviderAcceptedItIsNotDuplicated(t *testing.T) {
@@ -193,7 +216,7 @@ func TestASendThatTimesOutAfterTheProviderAcceptedItIsNotDuplicated(t *testing.T
 			t.Errorf("Delivery %s was requested %d times, want 2 (the timeout, then the replayed acceptance)", m.IdempotencyKey, m.Requests)
 		}
 	}
-	for _, d := range campaignDeliveries(t, baseURL, c.ID, "sent") {
+	for _, d := range campaignDeliveries(t, pool, c.ID, "sent") {
 		if len(d.Attempts) != 2 {
 			t.Fatalf("Delivery %d logged %d Attempts, want 2", d.ID, len(d.Attempts))
 		}

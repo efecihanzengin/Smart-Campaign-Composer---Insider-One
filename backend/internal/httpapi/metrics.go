@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"campaigncomposer/internal/worker"
+	"campaigncomposer/internal/content"
 )
 
 // metrics serves per-Channel Delivery counters in the Prometheus text
@@ -16,7 +16,7 @@ import (
 func (s *server) metrics(w http.ResponseWriter, r *http.Request) {
 	type counts struct{ sent, failed, retries int64 }
 	byChannel := map[string]*counts{}
-	for _, ch := range worker.Channels {
+	for _, ch := range content.Channels {
 		byChannel[ch] = &counts{}
 	}
 	rows, err := s.pool.Query(r.Context(), `
@@ -66,7 +66,7 @@ func (s *server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range series {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n", m.name, m.help, m.name)
-		for _, ch := range worker.Channels {
+		for _, ch := range content.Channels {
 			fmt.Fprintf(&b, "%s{channel=%q} %d\n", m.name, ch, m.value(byChannel[ch]))
 		}
 	}

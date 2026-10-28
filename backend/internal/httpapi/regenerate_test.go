@@ -235,9 +235,7 @@ func TestRegeneratingTheSegmentRuleRevalidatesTheEditedContentWithoutRegeneratin
 	}
 
 	var got regeneratedSegment
-	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece kadınlar"}, &got); code != http.StatusOK {
-		t.Fatalf("status code = %d, want 200", code)
-	}
+	segmentDone(t, streamSegment(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece kadınlar"}), &got)
 
 	if !slices.Equal(got.Segment.Labels, []string{"Şehir: Diyarbakır"}) {
 		t.Errorf("labels = %q, want the new Segment Rule's", got.Segment.Labels)
@@ -280,12 +278,14 @@ func TestSegmentRuleRegenerationGoesThroughTheRepairLoop(t *testing.T) {
 	srv := startAPI(t, httpapi.Options{LLM: &llm.Mock{SegmentFunc: segments.call}})
 	c := createCampaign(t, srv.URL, exampleBrief)
 
+	events := streamSegment(t, segmentURL(srv.URL, c.ID), map[string]string{})
 	var got regeneratedSegment
-	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{}, &got); code != http.StatusOK {
-		t.Fatalf("status code = %d, want 200", code)
-	}
+	segmentDone(t, events, &got)
 	if got.Repairs != 1 {
 		t.Errorf("repairs = %d, want 1", got.Repairs)
+	}
+	if notices := repairNotices(t, events); len(notices) != 1 || notices[0].Repair != 1 {
+		t.Errorf("repair notices = %+v, want one while the rule was repaired", notices)
 	}
 	if last := segments.requests[len(segments.requests)-1]; last.Repair == nil || last.Regenerate == nil {
 		t.Errorf("repair call = %+v, want both the repair and the regeneration", last)
@@ -297,12 +297,8 @@ func TestSegmentRuleRegenerationThatCannotBeRepairedKeepsTheCurrentRule(t *testi
 	srv, pool := startAPIWithPool(t, httpapi.Options{LLM: &llm.Mock{SegmentFunc: segments.call}})
 	c := createCampaign(t, srv.URL, exampleBrief)
 
-	var body struct {
-		Error     string `json:"error"`
-		Retryable bool   `json:"retryable"`
-	}
-	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "x"}, &body); code != http.StatusBadGateway || !body.Retryable {
-		t.Fatalf("status code = %d, body %+v; want a retryable 502", code, body)
+	if body := lastError(t, streamSegment(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "x"})); !body.Retryable {
+		t.Fatalf("error = %+v, want a retryable error", body)
 	}
 	if len(segments.requests) != 4 {
 		t.Errorf("Segment calls = %d, want the first + 1 + 2 repairs", len(segments.requests))
@@ -326,9 +322,7 @@ func TestASegmentRuleRegenerationThatEmptiesTheAudienceDisablesTheChannels(t *te
 		regeneratedSegment
 		DisabledChannels map[string]string `json:"disabled_channels"`
 	}
-	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece Hakkari"}, &got); code != http.StatusOK {
-		t.Fatalf("status code = %d, want 200", code)
-	}
+	segmentDone(t, streamSegment(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece Hakkari"}), &got)
 	if len(got.EnabledChannels) != 0 || got.DisabledChannels["sms"] == "" || got.DisabledChannels["email"] == "" {
 		t.Errorf("enabled %q, disabled %q; want both Channels off with an explanation", got.EnabledChannels, got.DisabledChannels)
 	}
@@ -349,9 +343,7 @@ func TestTheDefaultMockRegeneratesValidContentAndSegmentRules(t *testing.T) {
 		}
 	}
 	var got regeneratedSegment
-	if code := postJSON(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece Ankara"}, &got); code != http.StatusOK {
-		t.Fatalf("segment: status code = %d, want 200", code)
-	}
+	segmentDone(t, streamSegment(t, segmentURL(srv.URL, c.ID), map[string]string{"instruction": "sadece Ankara"}), &got)
 	if !slices.Contains(got.Segment.Labels, "Şehir: Ankara") || got.Repairs != 0 {
 		t.Errorf("segment = %+v, want Ankara without repairs", got.Segment)
 	}

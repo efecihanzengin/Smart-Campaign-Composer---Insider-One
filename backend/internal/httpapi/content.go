@@ -23,6 +23,55 @@ type contentView struct {
 	Email *content.Email `json:"email"`
 }
 
+// readContent reads a Campaign's stored Content.
+func readContent(ctx context.Context, q segment.Querier, id int64) (contentView, error) {
+	var v contentView
+	rows, err := q.Query(ctx, `SELECT channel, subject, preheader, body, cta_text FROM contents WHERE campaign_id = $1`, id)
+	if err != nil {
+		return v, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var channel string
+		var e content.Email
+		if err := rows.Scan(&channel, &e.Subject, &e.Preheader, &e.Body, &e.CTAText); err != nil {
+			return v, err
+		}
+		switch channel {
+		case "sms":
+			v.SMS = &content.SMS{Body: e.Body}
+		case "email":
+			v.Email = &e
+		}
+	}
+	return v, rows.Err()
+}
+
+// channels lists the Channels that have Content, in display order.
+func (v contentView) channels() []string {
+	var out []string
+	if v.SMS != nil {
+		out = append(out, "sms")
+	}
+	if v.Email != nil {
+		out = append(out, "email")
+	}
+	return out
+}
+
+// proposal is the Content of the given Channels, as the validator takes it;
+// a listed Channel without Content is validated as missing.
+func (v contentView) proposal(channels []string) content.Proposal {
+	p := content.Proposal{Channels: channels}
+	if slices.Contains(channels, "sms") {
+		p.SMS = v.SMS
+	}
+	if slices.Contains(channels, "email") {
+		p.Email = v.Email
+	}
+	return p
+}
+
 type contentDone struct {
 	EnabledChannels []string                      `json:"enabled_channels"`
 	Content         contentView                   `json:"content"`
@@ -38,46 +87,32 @@ const contentFailed = "Model geçerli bir içerik üretemedi. Lütfen tekrar den
 // and content.done carries the stored Content, the inferred Channels and the
 // validation results. A failed call ends with an error event.
 func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+	id, ok := campaignID(w, r)
+	if !ok {
 		return
 	}
 	ctx := r.Context()
-	var brief, status string
-	var ruleJSON []byte
-	err = s.pool.QueryRow(ctx, `SELECT brief, status, segment_rule FROM campaigns WHERE id = $1`, id).
-		Scan(&brief, &status, &ruleJSON)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Kampanya bulunamadı."})
+	const notDraft = "Yalnızca taslak kampanyanın içeriği üretilebilir."
+	c, err := s.loadCampaign(ctx, id)
+	if errors.Is(err, errCampaignNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": campaignNotFound})
 		return
 	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if status != "draft" {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanyanın içeriği üretilebilir."})
+	if c.status != "draft" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": notDraft})
 		return
 	}
-	rule, err := storedRule(ruleJSON)
+	longest, err := longestValues(ctx, s.pool, c.rule)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	labels := segment.Labels(rule)
-	longest, err := s.longest(ctx, rule)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	endGeneration, err := s.beginGeneration(ctx, id)
-	if errors.Is(err, errNotDraft) {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanyanın içeriği üretilebilir."})
-		return
-	}
-	if err != nil {
-		writeError(w, err)
+	endGeneration, ok := s.trackGeneration(w, r, id, notDraft)
+	if !ok {
 		return
 	}
 	defer endGeneration()
@@ -88,7 +123,7 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proposal, validation, repairs, err := s.proposeContent(ctx, llm.ContentRequest{Brief: brief, AudienceLabels: labels}, longest,
+	proposal, validation, repairs, err := s.proposeContent(ctx, llm.ContentRequest{Brief: c.brief, AudienceLabels: segment.Labels(c.rule)}, longest,
 		func(p content.Proposal) { sse.send("content.delta", p) },
 		func(n repairNotice) { sse.send("content.repair", n) })
 	if err != nil {
@@ -97,7 +132,7 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		sse.send("error", sseError{Error: contentFailed, Retryable: true})
 		return
 	}
-	enabled, err := saveContent(ctx, s, id, proposal)
+	enabled, err := s.saveContent(ctx, id, proposal)
 	if err != nil {
 		log.Printf("save content: %v", err)
 		sse.send("error", sseError{Error: "İçerik kaydedilemedi. Lütfen tekrar deneyin.", Retryable: true})
@@ -130,7 +165,7 @@ func storedRule(ruleJSON []byte) (segment.Node, error) {
 // saveContent replaces the Campaign's Content with the proposal's and enables
 // the Channels Claude inferred, except those whose Audience is empty. It
 // returns the enabled Channels.
-func saveContent(ctx context.Context, s *server, id int64, p content.Proposal) (enabled []string, err error) {
+func (s *server) saveContent(ctx context.Context, id int64, p content.Proposal) (enabled []string, err error) {
 	return enabled, pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		audience, err := campaignAudience(ctx, tx, id)
 		if err != nil {
@@ -241,6 +276,13 @@ func startSSE(w http.ResponseWriter) (*sseWriter, bool) {
 	w.WriteHeader(http.StatusOK)
 	f.Flush()
 	return &sseWriter{w: w, f: f}, true
+}
+
+// fail logs why a generation stream failed and ends it with an error event
+// carrying the Marketer-facing message.
+func (s *sseWriter) fail(what string, err error, message string, retryable bool) {
+	log.Printf("%s: %v", what, err)
+	s.send("error", sseError{Error: message, Retryable: retryable})
 }
 
 // send writes one event; data is JSON-encoded on a single line.

@@ -42,15 +42,15 @@ export class ApiError extends Error {
   }
 }
 
-export async function createCampaign(brief: string): Promise<Campaign> {
-  const res = await fetch('/api/campaigns', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ brief }),
-  })
-  const body = await res.json().catch(() => null)
-  if (!res.ok) throw new ApiError(body?.error ?? `POST /api/campaigns: ${res.status}`, body?.retryable === true)
-  return body
+// createCampaign creates a Campaign from a Brief. Claude's Segment Rule
+// arrives over SSE; onRepair hears about each repair of a rejected rule while
+// it runs (ADR-0005).
+export function createCampaign(brief: string, onRepair: (n: RepairNotice) => void): Promise<Campaign> {
+  return streamSegment<Campaign>(
+    '/api/campaigns',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brief }) },
+    onRepair,
+  )
 }
 
 export type Channel = 'sms' | 'email'
@@ -105,16 +105,38 @@ export interface RepairNotice {
   errors: string[]
 }
 
+interface StreamError {
+  type: 'error'
+  data: { error: string; retryable?: boolean }
+}
+
 export type ContentEvent =
   | { type: 'content.delta'; data: ContentDelta }
   | { type: 'content.repair'; data: RepairNotice }
   | { type: 'content.done'; data: ContentDone }
-  | { type: 'error'; data: { error: string; retryable?: boolean } }
+  | StreamError
+
+type SegmentEvent<T> = { type: 'segment.repair'; data: RepairNotice } | { type: 'segment.done'; data: T } | StreamError
+
+// streamSegment runs a streamed Segment call and resolves to its result, or
+// rejects with the error the stream ended with.
+async function streamSegment<T>(url: string, init: RequestInit, onRepair: (n: RepairNotice) => void): Promise<T> {
+  let result: T | undefined
+  let failure: ApiError | undefined
+  await readStream<SegmentEvent<T>>(url, init, (e) => {
+    if (e.type === 'segment.repair') onRepair(e.data)
+    else if (e.type === 'segment.done') result = e.data
+    else failure = new ApiError(e.data.error, e.data.retryable === true)
+  })
+  if (failure) throw failure
+  if (result === undefined) throw new ApiError('Sunucuya ulaşılamadı. Lütfen tekrar deneyin.', true)
+  return result
+}
 
 // streamContent runs the streamed Content call and hands every SSE event to
 // onEvent as it arrives. It resolves when the stream ends.
 export function streamContent(id: number, onEvent: (e: ContentEvent) => void): Promise<void> {
-  return readContentStream(`/api/campaigns/${id}/content`, { method: 'POST' }, onEvent)
+  return readStream(`/api/campaigns/${id}/content`, { method: 'POST' }, onEvent)
 }
 
 // regenerateContent asks Claude to rewrite one Channel's Content, with the
@@ -126,7 +148,7 @@ export function regenerateContent(
   instruction: string,
   onEvent: (e: ContentEvent) => void,
 ): Promise<void> {
-  return readContentStream(
+  return readStream(
     `/api/campaigns/${id}/content/${channel}/regenerate`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) },
     onEvent,
@@ -141,24 +163,28 @@ export interface RegeneratedSegment extends Campaign {
   validation: Partial<Record<Channel, Validation>>
 }
 
-// regenerateSegment asks Claude for a new Segment Rule. Content is never
-// regenerated with it, only validated again.
-export async function regenerateSegment(id: number, instruction: string): Promise<RegeneratedSegment> {
-  const res = await fetch(`/api/campaigns/${id}/segment/regenerate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction }),
-  })
-  const body = await res.json().catch(() => null)
-  if (!res.ok) throw new ApiError(body?.error ?? `POST segment/regenerate: ${res.status}`, body?.retryable === true)
-  return body
+// regenerateSegment asks Claude for a new Segment Rule, streamed like the
+// first one. Content is never regenerated with it, only validated again.
+export function regenerateSegment(
+  id: number,
+  instruction: string,
+  onRepair: (n: RepairNotice) => void,
+): Promise<RegeneratedSegment> {
+  return streamSegment<RegeneratedSegment>(
+    `/api/campaigns/${id}/segment/regenerate`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) },
+    onRepair,
+  )
 }
 
-async function readContentStream(url: string, init: RequestInit, onEvent: (e: ContentEvent) => void): Promise<void> {
+// readStream POSTs a generation request and hands every SSE event to onEvent
+// as it arrives. It resolves when the stream ends; a request refused before
+// the stream opened rejects with the API's message.
+async function readStream<E>(url: string, init: RequestInit, onEvent: (e: E) => void): Promise<void> {
   const res = await fetch(url, init)
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => null)
-    throw new ApiError(body?.error ?? `POST ${url}: ${res.status}`)
+    throw new ApiError(body?.error ?? `POST ${url}: ${res.status}`, body?.retryable === true)
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
   let buffer = ''
@@ -176,7 +202,7 @@ async function readContentStream(url: string, init: RequestInit, onEvent: (e: Co
         if (line.startsWith('event: ')) type = line.slice(7)
         else if (line.startsWith('data: ')) data += line.slice(6)
       }
-      if (type && data) onEvent({ type, data: JSON.parse(data) } as ContentEvent)
+      if (type && data) onEvent({ type, data: JSON.parse(data) } as E)
     }
   }
 }
@@ -265,8 +291,8 @@ export async function approveCampaign(id: number): Promise<Approval> {
 // cancellable lists the statuses a Campaign can be cancelled from.
 export const cancellable = ['draft', 'approved', 'sending']
 
-// cancelCampaign stops a Campaign: nothing still pending is sent, and
-// Deliveries already in flight finish. It resolves to the new status.
+// cancelCampaign stops a Campaign: Deliveries not yet sent are cancelled, and
+// those already in flight finish. It resolves to the new status.
 export async function cancelCampaign(id: number): Promise<string> {
   const res = await fetch(`/api/campaigns/${id}/cancel`, { method: 'POST' })
   const body = await res.json().catch(() => null)
@@ -274,11 +300,13 @@ export async function cancelCampaign(id: number): Promise<string> {
   return body.status
 }
 
-// ChannelCounts is a Channel's Deliveries by state; pending includes those in flight.
+// ChannelCounts is a Channel's Deliveries by state; pending includes those in
+// flight, and cancelled counts those a cancelled Campaign never sent.
 export interface ChannelCounts {
   pending: number
   sent: number
   failed: number
+  cancelled?: number
   total: number
 }
 
@@ -288,7 +316,8 @@ export interface CampaignProgress {
   brief: string
   status: string
   deliveries: Partial<Record<Channel, ChannelCounts>>
-  // progress is the share of Deliveries with an outcome, from 0 to 1.
+  // progress is the share of Deliveries with an outcome (sent, failed or
+  // cancelled), from 0 to 1.
   progress: number
 }
 

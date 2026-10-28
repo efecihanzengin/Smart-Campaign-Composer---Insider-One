@@ -24,6 +24,10 @@ type Options struct {
 	// DashboardInterval is how often the dashboard stream re-reads the
 	// Delivery counts; zero means 500ms.
 	DashboardInterval time.Duration
+	// GenerationHeartbeat is how often a running generation call renews its
+	// claim to block approval; a claim not renewed for three heartbeats has
+	// expired (the api process died). Zero means 5s.
+	GenerationHeartbeat time.Duration
 }
 
 type server struct {
@@ -39,6 +43,9 @@ func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
 	if opts.DashboardInterval <= 0 {
 		opts.DashboardInterval = 500 * time.Millisecond
 	}
+	if opts.GenerationHeartbeat <= 0 {
+		opts.GenerationHeartbeat = 5 * time.Second
+	}
 	s := &server{pool: pool, opts: opts}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
@@ -46,7 +53,6 @@ func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
 	mux.HandleFunc("GET /api/campaigns/{id}", s.getCampaign)
-	mux.HandleFunc("GET /api/campaigns/{id}/deliveries", s.listDeliveries)
 	mux.HandleFunc("GET /api/dashboard", s.dashboard)
 	mux.HandleFunc("POST /api/campaigns/{id}/content", s.generateContent)
 	mux.HandleFunc("PUT /api/campaigns/{id}/content/{channel}", s.updateContent)
