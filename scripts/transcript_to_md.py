@@ -134,9 +134,13 @@ def main(src, dst, title):
     out = [f"# {title}", "", f"<!-- session: {session_id} -->", "",
            "Claude Code session export (desktop app). Thinking blocks and internal UI tool calls are omitted; "
            "tool outputs are truncated; secrets and personal data are redacted.", ""]
+    # A subagent transcript is all sidechain records; its "user" turns are the orchestrating session.
+    turns = [o for o in records if o.get("type") in ("user", "assistant")]
+    subagent = bool(turns) and all(o.get("isSidechain") for o in turns)
+    user_heading = "## 🧑 Orchestrator" if subagent else "## 🧑 User"
     last_role = None
     for o in records:
-        if o.get("isSidechain") or o.get("type") not in ("user", "assistant"):
+        if o.get("isSidechain") and not subagent or o.get("type") not in ("user", "assistant"):
             continue
         msg = o.get("message") or {}
         content = msg.get("content")
@@ -152,7 +156,7 @@ def main(src, dst, title):
                 if b.get("type") == "text":
                     text = clean_user_text(b["text"])
                     if text:
-                        out += ["---", "", "## 🧑 User", "", text, ""]
+                        out += ["---", "", user_heading, "", text, ""]
                         last_role = "user"
                 elif b.get("type") == "tool_result":
                     tool = pending.pop(b.get("tool_use_id"), None)
