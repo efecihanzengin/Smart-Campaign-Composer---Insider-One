@@ -17,6 +17,28 @@ func Compile(rule Node) (where string, args []any) {
 	return where, c.args
 }
 
+// profileSQL maps each whitelisted profile field and operator to the fixed
+// SQL around its bound value, and optionally how the value is bound. City
+// compares Turkish-casefolded on both sides.
+var profileSQL = map[string]map[string]struct {
+	prefix, suffix string
+	value          func(string) any
+}{
+	"city": {
+		"eq": {"tr_fold(r.city) = tr_fold(", ")", nil},
+		"in": {"tr_fold(r.city) IN (SELECT tr_fold(unnest(", "::text[])))", nil},
+	},
+	"language": {
+		"eq": {"r.language = ", "", nil},
+		"in": {"r.language = ANY (", "::text[])", nil},
+	},
+	// before a day: signed up before it starts; after a day: once it has ended.
+	"created_at": {
+		"before": {"r.created_at < ", "", func(s string) any { return mustDay(s) }},
+		"after":  {"r.created_at >= ", "", func(s string) any { return mustDay(s).AddDate(0, 0, 1) }},
+	},
+}
+
 type compiler struct{ args []any }
 
 func (c *compiler) bind(v any) string {
@@ -27,22 +49,49 @@ func (c *compiler) bind(v any) string {
 func (c *compiler) node(n Node) string {
 	switch n := n.(type) {
 	case All:
-		parts := make([]string, len(n.Children))
-		for i, child := range n.Children {
-			parts[i] = c.node(child)
+		return c.join(n.Children, " AND ")
+	case Any:
+		return c.join(n.Children, " OR ")
+	case Not:
+		return "NOT (" + c.node(n.Child) + ")"
+	case ProfileCond:
+		frag, ok := profileSQL[n.Field][n.Op]
+		if !ok {
+			break
 		}
-		return "(" + strings.Join(parts, " AND ") + ")"
-	case CityEq:
-		return "r.city = " + c.bind(n.Value)
+		v := n.value()
+		if frag.value != nil {
+			v = frag.value(n.Values[0])
+		}
+		return frag.prefix + c.bind(v) + frag.suffix
 	case EventCond:
 		exists := "EXISTS"
 		if !n.Has {
 			exists = "NOT EXISTS"
 		}
-		return exists + " (SELECT 1 FROM events e WHERE e.recipient_id = r.id AND e.type = " + c.bind(n.Type) +
-			" AND e.occurred_at >= now() - make_interval(days => " + c.bind(n.WithinDays) + "))"
+		sql := exists + " (SELECT 1 FROM events e WHERE e.recipient_id = r.id AND e.type = " + c.bind(n.Type) +
+			" AND e.occurred_at >= now() - make_interval(days => " + c.bind(n.WithinDays) + ")"
+		var having []string
+		if n.MinCount > 0 {
+			having = append(having, "count(*) >= "+c.bind(n.MinCount))
+		}
+		if n.MinAmount != "" {
+			having = append(having, "sum(e.amount) >= "+c.bind(n.MinAmount)+"::numeric")
+		}
+		if len(having) > 0 {
+			sql += " HAVING " + strings.Join(having, " AND ")
+		}
+		return sql + ")"
 	}
 	panic(fmt.Sprintf("segment: unknown node %T", n))
+}
+
+func (c *compiler) join(children []Node, op string) string {
+	parts := make([]string, len(children))
+	for i, child := range children {
+		parts[i] = c.node(child)
+	}
+	return "(" + strings.Join(parts, op) + ")"
 }
 
 // Audience is the number of Recipients a rule reaches on each Channel.
