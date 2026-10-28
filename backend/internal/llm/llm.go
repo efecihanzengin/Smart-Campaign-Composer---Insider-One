@@ -64,3 +64,37 @@ const ContentTool = `{
 type SegmentRequest struct {
 	Brief string
 }
+
+// SegmentInstructions is the system prompt of the Segment call. It describes
+// the whitelisted Segment Rule language (ADR-0003) the backend validates.
+const SegmentInstructions = `You turn a Marketer's Brief into a Segment Rule, through the propose_segment tool. Always answer by calling propose_segment exactly once.
+
+A Segment Rule is a JSON tree, at most 3 levels deep, built only from these nodes:
+- {"all": [node, ...]}: every child matches. Use it at the top level.
+- {"any": [node, ...]}: at least one child matches.
+- {"not": node}: the child does not match.
+- Profile condition: {"field": "city", "op": "eq", "value": "İstanbul"} or {"field": "city", "op": "in", "value": ["İstanbul", "Ankara"]}; {"field": "language", "op": "eq" | "in", "value": two-letter code such as "tr"}; {"field": "created_at", "op": "before" | "after", "value": "YYYY-MM-DD"}.
+- Event condition: {"event": "cart_add" | "purchase" | "page_view", "within_days": 1-365, "has": true | false}, optionally with "min_count" (1-1000) and, for purchase only, "min_amount" (a positive TRY amount as a JSON number).
+
+Rules:
+- "Sepete ekledi" is cart_add, "alışveriş yaptı" / "satın aldı" is purchase, "siteyi ziyaret etti" is page_view. "Yapmayan" / "almayan" means "has": false.
+- Write city names with their Turkish spelling (İstanbul, İzmir).
+- Never include consent: consent is applied separately for every Channel. Ignore which Channel the Brief names; that is decided elsewhere.
+- List every part of the Brief's audience that this language cannot express (for example a product category) in "unsupported_criteria", in the language of the Brief. Never silently drop or broaden a criterion. Use an empty list when everything fits.`
+
+// SegmentTool is the input schema of the propose_segment tool.
+const SegmentTool = `{
+  "type": "object",
+  "properties": {
+    "rule": {
+      "type": "object",
+      "description": "The Segment Rule: a tree of all / any / not nodes over profile and Event conditions, as described in the instructions."
+    },
+    "unsupported_criteria": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Parts of the Brief's audience the Segment Rule could not express."
+    }
+  },
+  "required": ["rule", "unsupported_criteria"]
+}`
