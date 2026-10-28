@@ -1,7 +1,11 @@
 // Package config reads process configuration from the environment.
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+	"time"
+)
 
 // DefaultModel is the Claude model used when ANTHROPIC_MODEL is not set.
 const DefaultModel = "claude-sonnet-5-5"
@@ -12,6 +16,12 @@ type Config struct {
 	AnthropicAPIKey string
 	AnthropicModel  string
 	ProviderURL     string
+
+	// Worker retry tuning. Zero (unset or invalid) leaves the worker's
+	// defaults: 500ms backoff base, 5s Provider timeout, 5 Attempts.
+	BackoffBase     time.Duration
+	ProviderTimeout time.Duration
+	MaxAttempts     int
 }
 
 func FromEnv() Config {
@@ -21,6 +31,9 @@ func FromEnv() Config {
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 		AnthropicModel:  env("ANTHROPIC_MODEL", DefaultModel),
 		ProviderURL:     env("PROVIDER_URL", "http://localhost:8081"),
+		BackoffBase:     time.Duration(positiveInt("WORKER_BACKOFF_BASE_MS")) * time.Millisecond,
+		ProviderTimeout: time.Duration(positiveInt("WORKER_PROVIDER_TIMEOUT_MS")) * time.Millisecond,
+		MaxAttempts:     positiveInt("WORKER_MAX_ATTEMPTS"),
 	}
 }
 
@@ -34,4 +47,13 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// positiveInt reads a positive integer, or 0 when key is unset or invalid.
+func positiveInt(key string) int {
+	n, err := strconv.Atoi(os.Getenv(key))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }

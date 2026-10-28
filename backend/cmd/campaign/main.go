@@ -87,5 +87,10 @@ func runWorker(ctx context.Context, cfg config.Config) error {
 	}
 	defer pool.Close()
 	log.Printf("worker sending to the Provider at %s", cfg.ProviderURL)
-	return worker.New(pool, worker.Options{ProviderURL: cfg.ProviderURL}).Run(ctx)
+	return worker.New(pool, worker.Options{
+		ProviderURL: cfg.ProviderURL,
+		BackoffBase: cfg.BackoffBase,
+		Timeout:     cfg.ProviderTimeout,
+		MaxAttempts: cfg.MaxAttempts,
+	}).Run(ctx)
 }

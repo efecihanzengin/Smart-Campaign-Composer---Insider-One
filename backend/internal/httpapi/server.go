@@ -42,9 +42,11 @@ func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
 	s := &server{pool: pool, opts: opts}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /api/overview", s.overview)
 	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
 	mux.HandleFunc("GET /api/campaigns/{id}", s.getCampaign)
+	mux.HandleFunc("GET /api/campaigns/{id}/deliveries", s.listDeliveries)
 	mux.HandleFunc("GET /api/dashboard", s.dashboard)
 	mux.HandleFunc("POST /api/campaigns/{id}/content", s.generateContent)
 	mux.HandleFunc("PUT /api/campaigns/{id}/content/{channel}", s.updateContent)

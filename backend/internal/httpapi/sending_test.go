@@ -40,7 +40,7 @@ func getCampaign(t *testing.T, baseURL string, id int64) campaignState {
 // startProvider serves the real mock Provider in-process.
 func startProvider(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(provider.New())
+	srv := httptest.NewServer(provider.New(provider.Options{}))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -48,10 +48,16 @@ func startProvider(t *testing.T) *httptest.Server {
 // startWorkers runs n Delivery workers in-process until the test ends.
 func startWorkers(t *testing.T, pool *pgxpool.Pool, providerURL string, n int) {
 	t.Helper()
+	startWorkersWith(t, pool, worker.Options{ProviderURL: providerURL, PollInterval: 10 * time.Millisecond}, n)
+}
+
+// startWorkersWith runs n Delivery workers configured by opts.
+func startWorkersWith(t *testing.T, pool *pgxpool.Pool, opts worker.Options, n int) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{}, n)
 	for range n {
-		w := worker.New(pool, worker.Options{ProviderURL: providerURL, PollInterval: 10 * time.Millisecond})
+		w := worker.New(pool, opts)
 		go func() {
 			defer func() { done <- struct{}{} }()
 			if err := w.Run(ctx); err != nil && ctx.Err() == nil {
