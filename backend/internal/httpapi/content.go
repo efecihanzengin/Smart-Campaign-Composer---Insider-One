@@ -71,6 +71,16 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	endGeneration, err := s.beginGeneration(ctx, id)
+	if errors.Is(err, errNotDraft) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanyanın içeriği üretilebilir."})
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer endGeneration()
 
 	sse, ok := startSSE(w)
 	if !ok {
@@ -105,13 +115,14 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		sse.send("error", map[string]string{"error": contentFailed})
 		return
 	}
-	if err := saveContent(ctx, s, id, proposal); err != nil {
+	enabled, err := saveContent(ctx, s, id, proposal)
+	if err != nil {
 		log.Printf("save content: %v", err)
 		sse.send("error", map[string]string{"error": "İçerik kaydedilemedi. Lütfen tekrar deneyin."})
 		return
 	}
 	sse.send("content.done", contentDone{
-		EnabledChannels: proposal.Channels,
+		EnabledChannels: enabled,
 		Content:         contentView{SMS: proposal.SMS, Email: proposal.Email},
 		Validation:      content.Validate(proposal, longest),
 	})
@@ -127,9 +138,15 @@ func storedRule(ruleJSON []byte) (segment.Node, error) {
 }
 
 // saveContent replaces the Campaign's Content with the proposal's and enables
-// exactly the Channels Claude inferred.
-func saveContent(ctx context.Context, s *server, id int64, p content.Proposal) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+// the Channels Claude inferred, except those whose Audience is empty. It
+// returns the enabled Channels.
+func saveContent(ctx context.Context, s *server, id int64, p content.Proposal) (enabled []string, err error) {
+	return enabled, pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		audience, err := campaignAudience(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		enabled = withAudience(p.Channels, audience)
 		if _, err := tx.Exec(ctx, `DELETE FROM contents WHERE campaign_id = $1`, id); err != nil {
 			return err
 		}
@@ -145,7 +162,7 @@ func saveContent(ctx context.Context, s *server, id int64, p content.Proposal) e
 				return err
 			}
 		}
-		_, err := tx.Exec(ctx, `UPDATE campaigns SET enabled_channels = $2 WHERE id = $1`, id, p.Channels)
+		_, err = tx.Exec(ctx, `UPDATE campaigns SET enabled_channels = $2 WHERE id = $1`, id, enabled)
 		return err
 	})
 }
@@ -164,6 +181,21 @@ func (s *server) setChannel(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Enabled == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Geçersiz istek."})
 		return
+	}
+	if *req.Enabled {
+		audience, err := campaignAudience(r.Context(), s.pool, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Taslak kampanya bulunamadı."})
+			return
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if why, empty := disabledChannels(audience)[channel]; empty {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": why})
+			return
+		}
 	}
 	// Channels are kept in display order, whatever order they were toggled in.
 	var enabled []string

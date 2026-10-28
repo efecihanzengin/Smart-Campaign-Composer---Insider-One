@@ -118,17 +118,18 @@ func (s *server) updateContent(w http.ResponseWriter, r *http.Request) {
 	var saved any
 	var tag pgconn.CommandTag
 	var err error
-	// The draft check is repeated in the write, so an edit racing approval
-	// can't change Content that is already frozen.
+	// The draft check is repeated in the write, under a share lock that waits
+	// for an approval holding the row, so an edit racing approval can't change
+	// Content that is already frozen.
 	if sms := p.SMS; sms != nil {
 		saved = sms
 		tag, err = s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, body)
-			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft'
+			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft' FOR SHARE
 			ON CONFLICT (campaign_id, channel) DO UPDATE SET body = EXCLUDED.body, updated_at = now()`, c.id, sms.Body)
 	} else if e := p.Email; e != nil {
 		saved = e
 		tag, err = s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, subject, preheader, body, cta_text)
-			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft'
+			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft' FOR SHARE
 			ON CONFLICT (campaign_id, channel) DO UPDATE SET subject = EXCLUDED.subject, preheader = EXCLUDED.preheader,
 				body = EXCLUDED.body, cta_text = EXCLUDED.cta_text, updated_at = now()`,
 			c.id, e.Subject, e.Preheader, e.Body, e.CTAText)

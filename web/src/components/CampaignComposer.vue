@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useCampaignStore } from '../stores/campaign'
+import ApprovalPanel from './ApprovalPanel.vue'
 import ContentReview from './ContentReview.vue'
 
 const exampleBrief =
@@ -86,5 +87,6 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
     </section>
 
     <ContentReview v-if="store.campaign" />
+    <ApprovalPanel v-if="store.campaign" />
   </div>
 </template>
