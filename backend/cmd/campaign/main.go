@@ -53,14 +53,15 @@ func runAPI(ctx context.Context, cfg config.Config) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
-	// The real Claude client arrives with its own slice; until then the scripted
-	// mock answers even when a key is set, and the UI says so.
-	if !cfg.MockLLM() {
-		log.Print("ANTHROPIC_API_KEY is set, but the real Claude client is not built yet; using the mock LLM")
-	}
+	// The key itself is never logged; only whether one is set.
+	mock := cfg.MockLLM()
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewHandler(pool, httpapi.Options{MockLLM: true, Model: cfg.AnthropicModel, LLM: llm.NewMock()}),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewHandler(pool, httpapi.Options{
+			MockLLM: mock,
+			Model:   cfg.AnthropicModel,
+			LLM:     llm.New(cfg.AnthropicAPIKey, cfg.AnthropicModel),
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -69,7 +70,7 @@ func runAPI(ctx context.Context, cfg config.Config) error {
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
 	}()
-	log.Printf("api listening on %s (mock LLM: true, model: %s)", cfg.HTTPAddr, cfg.AnthropicModel)
+	log.Printf("api listening on %s (mock LLM: %t, model: %s)", cfg.HTTPAddr, mock, cfg.AnthropicModel)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
