@@ -30,3 +30,17 @@ func TestMockLLMOnlyWithoutAKey(t *testing.T) {
 		t.Error("MockLLM is true with a key")
 	}
 }
+
+func TestRateLimitDefaultsTo100PerSecond(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_SECOND", "")
+	if got := config.FromEnv().RateLimit; got != 100 {
+		t.Errorf("rate limit = %v, want 100", got)
+	}
+}
+
+func TestRateLimitIsConfigurable(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_SECOND", "20")
+	if got := config.FromEnv().RateLimit; got != 20 {
+		t.Errorf("rate limit = %v, want 20", got)
+	}
+}

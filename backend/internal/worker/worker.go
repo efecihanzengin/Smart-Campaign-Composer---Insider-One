@@ -43,6 +43,10 @@ type Options struct {
 	// before it is due again. Backoff, attempt limits and permanent failures
 	// arrive with #13.
 	RetryDelay time.Duration
+	// RateLimit is the most Provider requests per second on each Channel,
+	// shared by the Worker's sending on that Channel (#14). A burst of 429s
+	// lowers it for a while; see Bucket.
+	RateLimit float64
 }
 
 func (o Options) withDefaults() Options {
@@ -64,23 +68,40 @@ func (o Options) withDefaults() Options {
 	if o.RetryDelay <= 0 {
 		o.RetryDelay = time.Second
 	}
+	if o.RateLimit <= 0 {
+		o.RateLimit = 100
+	}
 	return o
 }
+
+// paceHeadroom paces requests 2% under RateLimit. Pacing exactly at the
+// limit puts limit+1 requests exactly one second apart, so a few ms of
+// network jitter would let the Provider see limit+1 within a second; 2%
+// leaves about 20ms of slack.
+const paceHeadroom = 0.98
 
 // Worker claims and sends Deliveries.
 type Worker struct {
 	pool   *pgxpool.Pool
 	opts   Options
 	client *http.Client
+	// buckets holds one token bucket per Channel; the map is not written
+	// after New.
+	buckets map[string]*Bucket
 }
 
 // New returns a Worker sending through the Provider at opts.ProviderURL.
 func New(pool *pgxpool.Pool, opts Options) *Worker {
 	opts = opts.withDefaults()
+	buckets := make(map[string]*Bucket, len(Channels))
+	for _, ch := range Channels {
+		buckets[ch] = NewBucket(opts.RateLimit*paceHeadroom, nil)
+	}
 	return &Worker{
-		pool:   pool,
-		opts:   opts,
-		client: &http.Client{Timeout: opts.Timeout},
+		pool:    pool,
+		opts:    opts,
+		client:  &http.Client{Timeout: opts.Timeout},
+		buckets: buckets,
 	}
 }
 
@@ -142,7 +163,10 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			// The token bucket (#14) takes a token here, before each request.
+			// Shutting down: the claimed Delivery waits out its lease.
+			if w.buckets[channel].Wait(ctx) != nil {
+				return
+			}
 			w.send(ctx, channel, d)
 		}()
 	}
@@ -233,6 +257,9 @@ func (w *Worker) post(ctx context.Context, channel string, d delivery) (int, err
 	}
 	defer res.Body.Close()
 	_, _ = io.Copy(io.Discard, res.Body)
+	if res.StatusCode == http.StatusTooManyRequests {
+		w.buckets[channel].Observe429()
+	}
 	return res.StatusCode, nil
 }
 
