@@ -10,3 +10,4 @@ Each line is one decision; the linked ADR holds the reasoning and rejected alter
 6. [Idempotency key and claim lease prevent duplicate sends](docs/adr/0006-idempotency-key-and-lease.md): retries after timeouts and crashed workers are safe.
 7. [Claude reports what it could not target instead of guessing](docs/adr/0007-unsupported-criteria-warning.md): `unsupported_criteria` is shown to the Marketer as a warning.
 8. [One Content per Channel for now](docs/adr/0008-one-content-per-channel.md): per-language and A/B Content are deferred until after the core flow.
+9. [The seed is deterministic relative to the day it runs](docs/adr/0009-seed-anchored-to-seed-day.md): identical data from a fixed random seed, timestamps measured back from the seed day.
