@@ -29,13 +29,16 @@ def build_redactions():
         (re.compile(r"[A-Za-z0-9._%+\-]+@(?!anthropic\.com)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"), "[redacted-email]"),
     ]
     # Also redact parts of the name and email, which show up in commands like grep patterns.
-    # Name parts match case-sensitively so a lowercase GitHub handle stays intact.
+    # Name parts match in any case but only where no letter touches them, so a GitHub handle that
+    # runs them together stays intact while grep patterns like "[a-z]*part[a-z]*" or a regex
+    # "\bPart\b" (whose "b" is a letter) are caught.
     name = git_config("user.name")
     if name:
-        rules.append((re.compile(re.escape(name)), "[redacted name]"))
+        rules.append((re.compile(re.escape(name), re.I), "[redacted name]"))
         for part in name.split():
             if len(part) >= 3:
-                rules.append((re.compile(re.escape(part)), "[redacted name]"))
+                bounded = r"(?:(?<=\\b)|(?<![^\W\d_]))" + re.escape(part) + r"(?=\\b|(?![^\W\d_]))"
+                rules.append((re.compile(bounded, re.I), "[redacted name]"))
     # Extra terms (e.g. another email's local part) come from SCRUB_TERMS="a,b" and from the gitignored
     # .scrub-terms file (one per line, # for comments), so they never live in the repo.
     extra = [t.strip() for t in os.environ.get("SCRUB_TERMS", "").split(",") if t.strip()]
