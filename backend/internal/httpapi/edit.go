@@ -16,19 +16,22 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// storedCampaign is what Content validation needs of a Campaign.
+// storedCampaign is what validation and regeneration need of a Campaign.
 type storedCampaign struct {
-	id   int64
-	rule segment.Node
+	id     int64
+	brief  string
+	status string
+	rule   segment.Node
 }
 
 var errCampaignNotFound = errors.New("campaign not found")
 
-// loadCampaign reads a Campaign and its Segment Rule.
+// loadCampaign reads a Campaign's Brief, status and Segment Rule.
 func (s *server) loadCampaign(ctx context.Context, id int64) (storedCampaign, error) {
 	c := storedCampaign{id: id}
 	var ruleJSON []byte
-	err := s.pool.QueryRow(ctx, `SELECT segment_rule FROM campaigns WHERE id = $1`, id).Scan(&ruleJSON)
+	err := s.pool.QueryRow(ctx, `SELECT brief, status, segment_rule FROM campaigns WHERE id = $1`, id).
+		Scan(&c.brief, &c.status, &ruleJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, errCampaignNotFound
 	}
@@ -115,24 +118,8 @@ func (s *server) updateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	var saved any
-	var tag pgconn.CommandTag
-	var err error
-	// The draft check is repeated in the write, so an edit racing approval
-	// can't change Content that is already frozen.
-	if sms := p.SMS; sms != nil {
-		saved = sms
-		tag, err = s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, body)
-			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft'
-			ON CONFLICT (campaign_id, channel) DO UPDATE SET body = EXCLUDED.body, updated_at = now()`, c.id, sms.Body)
-	} else if e := p.Email; e != nil {
-		saved = e
-		tag, err = s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, subject, preheader, body, cta_text)
-			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft'
-			ON CONFLICT (campaign_id, channel) DO UPDATE SET subject = EXCLUDED.subject, preheader = EXCLUDED.preheader,
-				body = EXCLUDED.body, cta_text = EXCLUDED.cta_text, updated_at = now()`,
-			c.id, e.Subject, e.Preheader, e.Body, e.CTAText)
-	} else {
+	saved, tag, err := s.upsertContent(ctx, c.id, p)
+	if errors.Is(err, errNoContent) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Geçersiz istek."})
 		return
 	}
@@ -150,4 +137,27 @@ func (s *server) updateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": saved, "validation": v})
+}
+
+var errNoContent = errors.New("no Content to save")
+
+// upsertContent saves the one Channel's Content in p and leaves the other
+// Channel's alone. The draft check is part of the write, so a write racing
+// approval can't change Content that is already frozen: it affects no row.
+func (s *server) upsertContent(ctx context.Context, id int64, p content.Proposal) (any, pgconn.CommandTag, error) {
+	if sms := p.SMS; sms != nil {
+		tag, err := s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, body)
+			SELECT id, 'sms', $2 FROM campaigns WHERE id = $1 AND status = 'draft'
+			ON CONFLICT (campaign_id, channel) DO UPDATE SET body = EXCLUDED.body, updated_at = now()`, id, sms.Body)
+		return sms, tag, err
+	}
+	if e := p.Email; e != nil {
+		tag, err := s.pool.Exec(ctx, `INSERT INTO contents (campaign_id, channel, subject, preheader, body, cta_text)
+			SELECT id, 'email', $2, $3, $4, $5 FROM campaigns WHERE id = $1 AND status = 'draft'
+			ON CONFLICT (campaign_id, channel) DO UPDATE SET subject = EXCLUDED.subject, preheader = EXCLUDED.preheader,
+				body = EXCLUDED.body, cta_text = EXCLUDED.cta_text, updated_at = now()`,
+			id, e.Subject, e.Preheader, e.Body, e.CTAText)
+		return e, tag, err
+	}
+	return nil, pgconn.CommandTag{}, errNoContent
 }

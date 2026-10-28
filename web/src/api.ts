@@ -110,11 +110,52 @@ export type ContentEvent =
 
 // streamContent runs the streamed Content call and hands every SSE event to
 // onEvent as it arrives. It resolves when the stream ends.
-export async function streamContent(id: number, onEvent: (e: ContentEvent) => void): Promise<void> {
-  const res = await fetch(`/api/campaigns/${id}/content`, { method: 'POST' })
+export function streamContent(id: number, onEvent: (e: ContentEvent) => void): Promise<void> {
+  return readContentStream(`/api/campaigns/${id}/content`, { method: 'POST' }, onEvent)
+}
+
+// regenerateContent asks Claude to rewrite one Channel's Content, with the
+// Marketer's optional instruction. Deltas carry only that Channel; done
+// carries the Campaign's whole stored Content.
+export function regenerateContent(
+  id: number,
+  channel: Channel,
+  instruction: string,
+  onEvent: (e: ContentEvent) => void,
+): Promise<void> {
+  return readContentStream(
+    `/api/campaigns/${id}/content/${channel}/regenerate`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction }) },
+    onEvent,
+  )
+}
+
+// RegeneratedSegment is the Campaign with its new Segment Rule and Audience,
+// and its kept Content validated against the new Audience.
+export interface RegeneratedSegment extends Campaign {
+  enabled_channels: Channel[]
+  content: Content
+  validation: Partial<Record<Channel, Validation>>
+}
+
+// regenerateSegment asks Claude for a new Segment Rule. Content is never
+// regenerated with it, only validated again.
+export async function regenerateSegment(id: number, instruction: string): Promise<RegeneratedSegment> {
+  const res = await fetch(`/api/campaigns/${id}/segment/regenerate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction }),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(body?.error ?? `POST segment/regenerate: ${res.status}`, body?.retryable === true)
+  return body
+}
+
+async function readContentStream(url: string, init: RequestInit, onEvent: (e: ContentEvent) => void): Promise<void> {
+  const res = await fetch(url, init)
   if (!res.ok || !res.body) {
     const body = await res.json().catch(() => null)
-    throw new ApiError(body?.error ?? `POST /api/campaigns/${id}/content: ${res.status}`)
+    throw new ApiError(body?.error ?? `POST ${url}: ${res.status}`)
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
   let buffer = ''

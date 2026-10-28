@@ -27,8 +27,24 @@ type ContentRequest struct {
 	// AudienceLabels describe the Segment Rule in readable Turkish, so the copy
 	// fits the people it is written for.
 	AudienceLabels []string
+	// Regenerate is set when the Marketer asks Claude to rewrite one
+	// Channel's Content; Claude then writes Content for that Channel only.
+	Regenerate *Regeneration
 	// Repair is set when the call retries a rejected output (ADR-0005).
 	Repair *Repair
+}
+
+// Regeneration is the Marketer's request to rewrite one part of the
+// proposal: the Segment Rule, or one Channel's Content.
+type Regeneration struct {
+	// Instruction is the Marketer's optional free text ("daha kısa").
+	Instruction string
+	// Current is the part as it stands now, as JSON, including the
+	// Marketer's edits.
+	Current string
+	// Channel is the Channel whose Content is rewritten; empty for the
+	// Segment Rule.
+	Channel string
 }
 
 // Repair tells Claude why its previous output was rejected, so the retried
@@ -79,6 +95,8 @@ const ContentTool = `{
 // SegmentRequest is the input of the Segment call.
 type SegmentRequest struct {
 	Brief string
+	// Regenerate is set when the Marketer asks for a new Segment Rule.
+	Regenerate *Regeneration
 	// Repair is set when the call retries a rejected output (ADR-0005).
 	Repair *Repair
 }

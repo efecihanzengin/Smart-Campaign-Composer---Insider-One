@@ -219,6 +219,37 @@ func TestRepairCallsSendTheRejectedOutputAndTheValidatorErrors(t *testing.T) {
 	}
 }
 
+func TestRegenerationCallsSendTheInstructionAndTheCurrentOutput(t *testing.T) {
+	c, fake := newClaude(t, sseResponse(contentStream("tool_use", `{"channels": ["email"], "email": {}}`)...))
+	contentRegen := &llm.Regeneration{Instruction: "daha kısa", Current: `{"subject":"Eski konu"}`, Channel: "email"}
+	if err := c.Content(context.Background(), llm.ContentRequest{Brief: "Sepet SMS", Regenerate: contentRegen}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	seg, segFake := newClaude(t, jsonResponse(`{"id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+		"content": [{"type": "tool_use", "id": "toolu_1", "name": "propose_segment", "input": {"rule": {"all": []}, "unsupported_criteria": []}}],
+		"stop_reason": "tool_use", "usage": {"input_tokens": 1, "output_tokens": 1}}`))
+	segRegen := &llm.Regeneration{Instruction: "sadece kadınlar", Current: `{"rule":{"all":[]}}`}
+	if _, err := seg.Segment(context.Background(), llm.SegmentRequest{Brief: "Sepet SMS", Regenerate: segRegen}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		text  string
+		regen *llm.Regeneration
+	}{
+		"content": {userText(fake.requests[0]), contentRegen},
+		"segment": {userText(segFake.requests[0]), segRegen},
+	} {
+		if !strings.Contains(tc.text, "Sepet SMS") || !strings.Contains(tc.text, tc.regen.Instruction) ||
+			!strings.Contains(tc.text, tc.regen.Current) {
+			t.Errorf("%s regeneration message %q lacks the Brief, the instruction or the current output", name, tc.text)
+		}
+	}
+	if text := userText(fake.requests[0]); !strings.Contains(text, `only for the email Channel`) {
+		t.Errorf("content regeneration message %q does not limit Claude to the email Channel", text)
+	}
+}
+
 func TestContentFailsWhenTheOutputIsCutOff(t *testing.T) {
 	c, _ := newClaude(t, sseResponse(contentStream("max_tokens", `{"channels": ["sms"], "sms": {"bo`)...))
 	err := c.Content(context.Background(), llm.ContentRequest{Brief: "b"}, func(string) {})

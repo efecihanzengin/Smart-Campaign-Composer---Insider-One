@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { Channel, EmailContent, Length, Validation } from '../api'
 import { useCampaignStore } from '../stores/campaign'
+import RegenerateControl from './RegenerateControl.vue'
 
 const store = useCampaignStore()
 
@@ -37,6 +38,19 @@ const emailFields: { field: keyof EmailContent; test: string; label: string; mul
   { field: 'body', test: 'body', label: 'Gövde', multiline: true },
   { field: 'cta_text', test: 'cta', label: 'Buton metni (isteğe bağlı)' },
 ]
+
+// noLongerFits lists the Channels whose kept Content no longer fits the
+// Audience after the Segment Rule changed.
+const noLongerFits = computed(() =>
+  store.revalidated
+    ? (['sms', 'email'] as Channel[]).filter((c) => store.content[c] && store.validation[c]?.valid === false)
+    : [],
+)
+
+// waiting is true while Claude is writing this Channel's Content.
+const waiting = (c: Channel) => store.streaming && (store.regenerating === null || store.regenerating === c)
+
+const regeneratePlaceholder = 'İsteğe bağlı talimat, ör. daha kısa'
 
 const inputValue = (e: Event) => (e.target as HTMLInputElement | HTMLTextAreaElement).value
 
@@ -75,7 +89,7 @@ const fieldNames: Record<string, string> = {
           type="checkbox"
           :data-test="`channel-${c}`"
           :checked="enabled(c)"
-          :disabled="store.streaming"
+          :disabled="store.busy"
           @change="toggle(c, $event)"
         />
         {{ channelNames[c] }}
@@ -100,9 +114,26 @@ const fieldNames: Record<string, string> = {
       </button>
     </div>
 
+    <div
+      v-if="noLongerFits.length"
+      data-test="content-revalidated"
+      role="status"
+      class="rounded-md bg-amber-50 p-3 text-sm text-amber-800"
+    >
+      Hedef kitle değişti; içerik yeniden üretilmedi, yeni kitleye göre doğrulandı.
+      {{ noLongerFits.map((c) => channelNames[c]).join(' ve ') }} içeriği artık sığmıyor: düzenleyin ya da yeniden üretin.
+    </div>
+
     <div class="grid gap-4 md:grid-cols-2">
       <article class="space-y-3 rounded-md border border-slate-200 p-4" :class="{ 'opacity-50': !enabled('sms') }">
         <h3 class="text-sm font-medium">SMS</h3>
+        <RegenerateControl
+          part="sms"
+          :placeholder="regeneratePlaceholder"
+          :busy="store.regenerating === 'sms'"
+          :disabled="store.busy"
+          @regenerate="store.regenerateChannel('sms', $event)"
+        />
         <div v-if="sms" class="space-y-1">
           <label for="sms-body" class="sr-only">SMS metni</label>
           <textarea
@@ -110,7 +141,7 @@ const fieldNames: Record<string, string> = {
             data-test="sms-body"
             rows="5"
             :value="sms.body"
-            :disabled="store.streaming"
+            :disabled="store.busy"
             :class="inputClass"
             @input="store.edit('sms', { body: inputValue($event) })"
             @change="store.save('sms')"
@@ -125,7 +156,7 @@ const fieldNames: Record<string, string> = {
             {{ encodingNames[smsUsage.encoding ?? 'gsm7'] }} · {{ smsUsage.used }}/{{ smsUsage.limit }}
           </p>
         </div>
-        <p v-else class="text-sm text-slate-400">{{ store.streaming ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
+        <p v-else class="text-sm text-slate-400">{{ waiting('sms') ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
         <template v-if="smsValidation">
           <p v-if="smsValidation.valid" data-test="sms-valid" class="text-xs text-emerald-700">Kurallara uygun</p>
           <ul v-else data-test="sms-issues" class="list-disc space-y-1 pl-5 text-xs text-red-700">
@@ -136,6 +167,13 @@ const fieldNames: Record<string, string> = {
 
       <article class="space-y-3 rounded-md border border-slate-200 p-4" :class="{ 'opacity-50': !enabled('email') }">
         <h3 class="text-sm font-medium">E-posta</h3>
+        <RegenerateControl
+          part="email"
+          :placeholder="regeneratePlaceholder"
+          :busy="store.regenerating === 'email'"
+          :disabled="store.busy"
+          @regenerate="store.regenerateChannel('email', $event)"
+        />
         <div v-if="email" class="space-y-3 text-sm">
           <div v-for="f in emailFields" :key="f.field" class="space-y-1">
             <div class="flex items-baseline justify-between gap-2">
@@ -155,14 +193,14 @@ const fieldNames: Record<string, string> = {
               :data-test="`email-${f.test}`"
               :rows="f.multiline ? 8 : undefined"
               :value="email[f.field] ?? ''"
-              :disabled="store.streaming"
+              :disabled="store.busy"
               :class="inputClass"
               @input="store.edit('email', { [f.field]: inputValue($event) })"
               @change="store.save('email')"
             />
           </div>
         </div>
-        <p v-else class="text-sm text-slate-400">{{ store.streaming ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
+        <p v-else class="text-sm text-slate-400">{{ waiting('email') ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
         <template v-if="emailValidation">
           <p v-if="emailValidation.valid" data-test="email-valid" class="text-xs text-emerald-700">Kurallara uygun</p>
           <ul v-else data-test="email-issues" class="list-disc space-y-1 pl-5 text-xs text-red-700">

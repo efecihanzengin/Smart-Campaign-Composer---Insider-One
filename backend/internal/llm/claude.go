@@ -48,7 +48,8 @@ func (c *Claude) Segment(ctx context.Context, req SegmentRequest) (json.RawMessa
 		System:     []anthropic.TextBlockParam{{Text: SegmentInstructions}},
 		Tools:      []anthropic.ToolUnionParam{tool(segmentToolName, "Propose the Segment Rule for the Brief.", SegmentTool, false)},
 		ToolChoice: autoToolChoice(),
-		Messages:   []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Brief:\n" + req.Brief + repairText(req.Repair, segmentToolName)))},
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Brief:\n" + req.Brief +
+			regenerationText(req.Regenerate, "Segment Rule", "") + repairText(req.Repair, segmentToolName)))},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("segment call: %w", err)
@@ -77,6 +78,10 @@ func (c *Claude) Content(ctx context.Context, req ContentRequest, emit func(chun
 		for _, l := range req.AudienceLabels {
 			user.WriteString("\n- " + l)
 		}
+	}
+	if r := req.Regenerate; r != nil {
+		user.WriteString(regenerationText(r, r.Channel+" Content",
+			"\nWrite Content only for the "+r.Channel+` Channel, and set "channels" to ["`+r.Channel+`"].`))
 	}
 	user.WriteString(repairText(req.Repair, contentToolName))
 	stream := c.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
@@ -115,6 +120,27 @@ func (c *Claude) Content(ctx context.Context, req ContentRequest, emit func(chun
 		return fmt.Errorf("content call: Claude did not call %s", contentToolName)
 	}
 	return nil
+}
+
+// regenerationText is appended to the user message when the Marketer asks
+// for a part to be rewritten: the part as it stands now and the Marketer's
+// instruction, if any. extra adds part-specific rules.
+func regenerationText(r *Regeneration, part, extra string) string {
+	if r == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nThe Marketer asked you to write a new " + part + " for this Brief.")
+	if r.Current != "" {
+		b.WriteString("\nCurrent " + part + " (it may include the Marketer's own edits):\n" + r.Current)
+	}
+	if r.Instruction != "" {
+		b.WriteString("\nThe Marketer's instruction, which takes precedence over the Brief where they differ:\n" + r.Instruction)
+	} else {
+		b.WriteString("\nThe Marketer gave no instruction: write a different, better alternative.")
+	}
+	b.WriteString(extra)
+	return b.String()
 }
 
 // repairText is appended to the user message of a repair call (ADR-0005): the

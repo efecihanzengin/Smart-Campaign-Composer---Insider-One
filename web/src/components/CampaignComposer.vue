@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import { useCampaignStore } from '../stores/campaign'
 import ContentReview from './ContentReview.vue'
+import RegenerateControl from './RegenerateControl.vue'
 
 const exampleBrief =
   "Son 30 günde sepetine ürün ekleyip alışveriş yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
@@ -97,6 +98,31 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
         </div>
       </dl>
       <p class="text-xs text-slate-500">Sayılar yalnızca o kanal için izin vermiş alıcıları içerir.</p>
+
+      <RegenerateControl
+        part="segment"
+        placeholder="İsteğe bağlı talimat, ör. sadece Ankara"
+        :busy="store.segmentRegenerating"
+        :disabled="store.busy"
+        @regenerate="store.regenerateSegment($event)"
+      />
+      <div
+        v-if="store.segmentError"
+        data-test="segment-error"
+        class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-red-50 p-3 text-sm text-red-700"
+      >
+        <p>{{ store.segmentError }}</p>
+        <button
+          v-if="store.segmentRetryable"
+          type="button"
+          data-test="segment-retry"
+          :disabled="store.busy"
+          class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
+          @click="store.retrySegment()"
+        >
+          Tekrar dene
+        </button>
+      </div>
     </section>
 
     <ContentReview v-if="store.campaign" />

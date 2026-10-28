@@ -22,8 +22,7 @@ var errRepairsExhausted = errors.New("output still invalid after the maximum num
 // (ADR-0005): a failed call or a rejected Segment Rule is sent back to Claude
 // with the validator's message, at most llm.MaxRepairs times. It returns the
 // valid proposal and how many repairs it took.
-func (s *server) proposeSegment(ctx context.Context, brief string) (segment.Proposal, int, error) {
-	req := llm.SegmentRequest{Brief: brief}
+func (s *server) proposeSegment(ctx context.Context, req llm.SegmentRequest) (segment.Proposal, int, error) {
 	for repairs := 0; ; repairs++ {
 		raw, err := s.opts.LLM.Segment(ctx, req)
 		if ctx.Err() != nil {
@@ -83,6 +82,11 @@ func (s *server) proposeContent(ctx context.Context, req llm.ContentRequest, lon
 		if err == nil {
 			proposal, err = content.ParseProposal([]byte(raw.String()))
 		}
+		if err == nil && req.Regenerate != nil && req.Regenerate.Channel != "" {
+			// Only the regenerated Channel counts; whatever Claude wrote for
+			// the other one is ignored, so it can't trigger a repair either.
+			proposal, err = onlyChannel(proposal, req.Regenerate.Channel)
+		}
 		if err != nil {
 			errs = []string{err.Error()}
 		} else {
@@ -110,4 +114,19 @@ func validationErrors(v map[string]content.Validation) []string {
 		}
 	}
 	return errs
+}
+
+// onlyChannel narrows a proposal to one Channel's Content.
+func onlyChannel(p content.Proposal, channel string) (content.Proposal, error) {
+	out := content.Proposal{Channels: []string{channel}}
+	switch channel {
+	case "sms":
+		out.SMS = p.SMS
+	case "email":
+		out.Email = p.Email
+	}
+	if out.SMS == nil && out.Email == nil {
+		return content.Proposal{}, fmt.Errorf("Content for the %s Channel is missing", channel)
+	}
+	return out, nil
 }

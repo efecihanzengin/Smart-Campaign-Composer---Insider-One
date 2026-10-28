@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"campaigncomposer/internal/llm"
 	"campaigncomposer/internal/segment"
 )
 
@@ -46,7 +47,7 @@ func (s *server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	proposal, repairs, err := s.proposeSegment(ctx, brief)
+	proposal, repairs, err := s.proposeSegment(ctx, llm.SegmentRequest{Brief: brief})
 	if errors.Is(err, errRepairsExhausted) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": segmentFailed, "retryable": true})
 		return
