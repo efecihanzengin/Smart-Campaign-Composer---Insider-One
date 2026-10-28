@@ -2,12 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
-	"campaigncomposer/internal/llm"
 	"campaigncomposer/internal/segment"
 )
 
@@ -23,7 +22,11 @@ type campaignView struct {
 	Brief    string           `json:"brief"`
 	Segment  segmentView      `json:"segment"`
 	Audience segment.Audience `json:"audience"`
+	// Repairs is how many repairs the Segment call needed (ADR-0005).
+	Repairs int `json:"repairs"`
 }
+
+const segmentFailed = "Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin."
 
 // createCampaign creates a draft Campaign from a Brief, asks the LLM for its
 // Segment Rule and answers with the rule, its labels and the per-Channel
@@ -43,17 +46,13 @@ func (s *server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	raw, err := s.opts.LLM.Segment(ctx, llm.SegmentRequest{Brief: brief})
-	if err != nil {
-		writeError(w, err)
+	proposal, repairs, err := s.proposeSegment(ctx, brief)
+	if errors.Is(err, errRepairsExhausted) {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": segmentFailed, "retryable": true})
 		return
 	}
-	proposal, err := segment.ParseProposal(raw)
 	if err != nil {
-		// The repair loop (ADR-0005) will feed this back to Claude; until then the
-		// Marketer sees a retryable error.
-		log.Printf("invalid Segment Rule: %v", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Model geçersiz bir hedef kitle kuralı üretti. Lütfen tekrar deneyin."})
+		writeError(w, err)
 		return
 	}
 
@@ -64,7 +63,7 @@ func (s *server) createCampaign(w http.ResponseWriter, r *http.Request) {
 	}
 	// The Campaign is stored only once it has a valid Segment Rule, so failed
 	// generations leave nothing behind.
-	c := campaignView{Brief: brief}
+	c := campaignView{Brief: brief, Repairs: repairs}
 	if err := s.pool.QueryRow(ctx, `INSERT INTO campaigns (brief, segment_rule, unsupported_criteria)
 		VALUES ($1, $2, $3) RETURNING id, status`, brief, ruleJSON, proposal.UnsupportedCriteria).
 		Scan(&c.ID, &c.Status); err != nil {

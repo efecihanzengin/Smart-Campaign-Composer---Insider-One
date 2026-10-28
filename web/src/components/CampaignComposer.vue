@@ -39,9 +39,23 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
       </button>
     </form>
 
-    <p v-if="store.error" data-test="campaign-error" class="rounded-md bg-red-50 p-4 text-sm text-red-700">
-      {{ store.error }}
-    </p>
+    <div
+      v-if="store.error"
+      data-test="campaign-error"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-red-50 p-4 text-sm text-red-700"
+    >
+      <p>{{ store.error }}</p>
+      <button
+        v-if="store.retryable"
+        type="button"
+        data-test="campaign-retry"
+        :disabled="store.generating"
+        class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
+        @click="store.retry()"
+      >
+        Tekrar dene
+      </button>
+    </div>
 
     <section v-if="store.campaign" class="space-y-4 rounded-lg border border-slate-200 bg-white p-6">
       <h2 class="text-sm font-medium text-slate-500">Hedef kitle</h2>

@@ -24,10 +24,20 @@ export interface Campaign {
     unsupported_criteria: string[]
   }
   audience: Audience
+  // repairs is how many repairs the Segment call needed (ADR-0005).
+  repairs?: number
 }
 
-// ApiError carries the Marketer-facing message the API sent, if any.
-export class ApiError extends Error {}
+// ApiError carries the Marketer-facing message the API sent, if any, and
+// whether trying again may help (Claude's output could not be repaired).
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly retryable = false,
+  ) {
+    super(message)
+  }
+}
 
 export async function createCampaign(brief: string): Promise<Campaign> {
   const res = await fetch('/api/campaigns', {
@@ -36,7 +46,7 @@ export async function createCampaign(brief: string): Promise<Campaign> {
     body: JSON.stringify({ brief }),
   })
   const body = await res.json().catch(() => null)
-  if (!res.ok) throw new ApiError(body?.error ?? `POST /api/campaigns: ${res.status}`)
+  if (!res.ok) throw new ApiError(body?.error ?? `POST /api/campaigns: ${res.status}`, body?.retryable === true)
   return body
 }
 
@@ -82,12 +92,21 @@ export interface ContentDone {
   enabled_channels: Channel[]
   content: Content
   validation: Partial<Record<Channel, Validation>>
+  repairs?: number
+}
+
+// RepairNotice says Claude's output was rejected and is being repaired.
+export interface RepairNotice {
+  repair: number
+  max: number
+  errors: string[]
 }
 
 export type ContentEvent =
   | { type: 'content.delta'; data: ContentDelta }
+  | { type: 'content.repair'; data: RepairNotice }
   | { type: 'content.done'; data: ContentDone }
-  | { type: 'error'; data: { error: string } }
+  | { type: 'error'; data: { error: string; retryable?: boolean } }
 
 // streamContent runs the streamed Content call and hands every SSE event to
 // onEvent as it arrives. It resolves when the stream ends.

@@ -55,7 +55,15 @@ const fieldNames: Record<string, string> = {
   <section class="space-y-4 rounded-lg border border-slate-200 bg-white p-6">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <h2 class="text-sm font-medium text-slate-500">İçerik</h2>
-      <span v-if="store.streaming" data-test="content-streaming" class="text-xs text-slate-500">
+      <span
+        v-if="store.repairing"
+        data-test="content-repairing"
+        role="status"
+        class="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-800"
+      >
+        Kurallara uymayan içerik düzeltiliyor ({{ store.repairing.repair }}/{{ store.repairing.max }})…
+      </span>
+      <span v-else-if="store.streaming" data-test="content-streaming" class="text-xs text-slate-500">
         Claude yazıyor…
       </span>
     </div>
@@ -74,9 +82,23 @@ const fieldNames: Record<string, string> = {
       </label>
     </fieldset>
 
-    <p v-if="store.contentError" data-test="content-error" class="rounded-md bg-red-50 p-4 text-sm text-red-700">
-      {{ store.contentError }}
-    </p>
+    <div
+      v-if="store.contentError"
+      data-test="content-error"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-red-50 p-4 text-sm text-red-700"
+    >
+      <p>{{ store.contentError }}</p>
+      <button
+        v-if="store.contentRetryable"
+        type="button"
+        data-test="content-retry"
+        :disabled="store.streaming"
+        class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
+        @click="store.retry()"
+      >
+        Tekrar dene
+      </button>
+    </div>
 
     <div class="grid gap-4 md:grid-cols-2">
       <article class="space-y-3 rounded-md border border-slate-200 p-4" :class="{ 'opacity-50': !enabled('sms') }">

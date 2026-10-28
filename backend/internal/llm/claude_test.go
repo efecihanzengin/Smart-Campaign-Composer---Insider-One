@@ -188,6 +188,37 @@ func TestContentForwardsEachPartialJSONChunkOfTheToolCall(t *testing.T) {
 	}
 }
 
+func TestRepairCallsSendTheRejectedOutputAndTheValidatorErrors(t *testing.T) {
+	repair := &llm.Repair{
+		Previous: `{"channels": ["sms"], "sms": {"body": "aaaa"}}`,
+		Errors:   []string{"sms.body: SMS tek parçaya sığmalı: GSM-7 ile en fazla 160 karakter olabilir (şu an 172)."},
+	}
+	c, fake := newClaude(t, sseResponse(contentStream("tool_use", `{"channels": ["sms"], "sms": {"body": "a"}}`)...))
+	if err := c.Content(context.Background(), llm.ContentRequest{Brief: "Sepet SMS", Repair: repair}, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	seg, segFake := newClaude(t, jsonResponse(`{"id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+		"content": [{"type": "tool_use", "id": "toolu_1", "name": "propose_segment", "input": {"rule": {"all": []}, "unsupported_criteria": []}}],
+		"stop_reason": "tool_use", "usage": {"input_tokens": 1, "output_tokens": 1}}`))
+	segRepair := &llm.Repair{Previous: `{"rule": {"all": [`, Errors: []string{"proposal: must be an object: unexpected EOF"}}
+	if _, err := seg.Segment(context.Background(), llm.SegmentRequest{Brief: "Sepet SMS", Repair: segRepair}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tc := range map[string]struct {
+		text   string
+		repair *llm.Repair
+	}{
+		"content": {userText(fake.requests[0]), repair},
+		"segment": {userText(segFake.requests[0]), segRepair},
+	} {
+		if !strings.Contains(tc.text, "Sepet SMS") || !strings.Contains(tc.text, tc.repair.Previous) ||
+			!strings.Contains(tc.text, tc.repair.Errors[0]) {
+			t.Errorf("%s repair message %q lacks the Brief, the rejected output or the errors", name, tc.text)
+		}
+	}
+}
+
 func TestContentFailsWhenTheOutputIsCutOff(t *testing.T) {
 	c, _ := newClaude(t, sseResponse(contentStream("max_tokens", `{"channels": ["sms"], "sms": {"bo`)...))
 	err := c.Content(context.Background(), llm.ContentRequest{Brief: "b"}, func(string) {})

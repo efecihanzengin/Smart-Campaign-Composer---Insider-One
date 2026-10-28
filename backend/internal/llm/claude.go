@@ -48,7 +48,7 @@ func (c *Claude) Segment(ctx context.Context, req SegmentRequest) (json.RawMessa
 		System:     []anthropic.TextBlockParam{{Text: SegmentInstructions}},
 		Tools:      []anthropic.ToolUnionParam{tool(segmentToolName, "Propose the Segment Rule for the Brief.", SegmentTool, false)},
 		ToolChoice: autoToolChoice(),
-		Messages:   []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Brief:\n" + req.Brief))},
+		Messages:   []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("Brief:\n" + req.Brief + repairText(req.Repair, segmentToolName)))},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("segment call: %w", err)
@@ -78,6 +78,7 @@ func (c *Claude) Content(ctx context.Context, req ContentRequest, emit func(chun
 			user.WriteString("\n- " + l)
 		}
 	}
+	user.WriteString(repairText(req.Repair, contentToolName))
 	stream := c.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Model:      c.model,
 		MaxTokens:  contentMaxTokens,
@@ -114,6 +115,25 @@ func (c *Claude) Content(ctx context.Context, req ContentRequest, emit func(chun
 		return fmt.Errorf("content call: Claude did not call %s", contentToolName)
 	}
 	return nil
+}
+
+// repairText is appended to the user message of a repair call (ADR-0005): the
+// rejected tool input and why the backend rejected it.
+func repairText(r *Repair, toolName string) string {
+	if r == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nYour previous answer was rejected by the backend validator.")
+	if r.Previous != "" {
+		b.WriteString("\nPrevious " + toolName + " input:\n" + r.Previous)
+	}
+	b.WriteString("\nErrors:")
+	for _, e := range r.Errors {
+		b.WriteString("\n- " + e)
+	}
+	b.WriteString("\nFix every error and call " + toolName + " again with the complete, corrected input.")
+	return b.String()
 }
 
 const (

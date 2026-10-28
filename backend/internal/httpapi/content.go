@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 
 	"campaigncomposer/internal/content"
 	"campaigncomposer/internal/llm"
@@ -29,9 +27,11 @@ type contentDone struct {
 	EnabledChannels []string                      `json:"enabled_channels"`
 	Content         contentView                   `json:"content"`
 	Validation      map[string]content.Validation `json:"validation"`
+	// Repairs is how many repairs the Content call needed (ADR-0005).
+	Repairs int `json:"repairs"`
 }
 
-const contentFailed = "Model geçersiz bir içerik üretti. Lütfen tekrar deneyin."
+const contentFailed = "Model geçerli bir içerik üretemedi. Lütfen tekrar deneyin."
 
 // generateContent runs the streamed Content call for a draft Campaign and
 // forwards it over SSE: content.delta events carry the Content parsed so far,
@@ -78,43 +78,33 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var raw strings.Builder
-	var last []byte
-	err = s.opts.LLM.Content(ctx, llm.ContentRequest{Brief: brief, AudienceLabels: labels}, func(chunk string) {
-		raw.WriteString(chunk)
-		partial, ok := content.ParsePartial(raw.String())
-		if !ok {
-			return
-		}
-		b, err := json.Marshal(partial)
-		if err != nil || bytes.Equal(b, last) {
-			return
-		}
-		last = b
-		sse.send("content.delta", json.RawMessage(b))
-	})
+	proposal, validation, repairs, err := s.proposeContent(ctx, llm.ContentRequest{Brief: brief, AudienceLabels: labels}, longest,
+		func(p content.Proposal) { sse.send("content.delta", p) },
+		func(n repairNotice) { sse.send("content.repair", n) })
 	if err != nil {
+		// Nothing is stored: invalid output never becomes the proposal.
 		log.Printf("content call: %v", err)
-		sse.send("error", map[string]string{"error": contentFailed})
-		return
-	}
-	proposal, err := content.ParseProposal([]byte(raw.String()))
-	if err != nil {
-		// The repair loop (ADR-0005) will feed this back to Claude.
-		log.Printf("invalid Content: %v", err)
-		sse.send("error", map[string]string{"error": contentFailed})
+		sse.send("error", sseError{Error: contentFailed, Retryable: true})
 		return
 	}
 	if err := saveContent(ctx, s, id, proposal); err != nil {
 		log.Printf("save content: %v", err)
-		sse.send("error", map[string]string{"error": "İçerik kaydedilemedi. Lütfen tekrar deneyin."})
+		sse.send("error", sseError{Error: "İçerik kaydedilemedi. Lütfen tekrar deneyin.", Retryable: true})
 		return
 	}
 	sse.send("content.done", contentDone{
 		EnabledChannels: proposal.Channels,
 		Content:         contentView{SMS: proposal.SMS, Email: proposal.Email},
-		Validation:      content.Validate(proposal, longest),
+		Validation:      validation,
+		Repairs:         repairs,
 	})
+}
+
+// sseError ends a generation stream that failed; Retryable tells the UI to
+// offer the Marketer another try.
+type sseError struct {
+	Error     string `json:"error"`
+	Retryable bool   `json:"retryable"`
 }
 
 // storedRule decodes a Campaign's stored Segment Rule.
