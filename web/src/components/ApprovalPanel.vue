@@ -25,6 +25,14 @@ const summary = computed(() => {
       Kampanya onaylandı. Hedef kitle donduruldu: {{ summary }} gönderimi oluşturuldu.
     </p>
 
+    <p
+      v-else-if="store.campaign?.status === 'cancelled'"
+      data-test="cancelled"
+      class="rounded-md bg-slate-100 p-4 text-sm text-slate-700"
+    >
+      Kampanya iptal edildi; hiçbir mesaj gönderilmeyecek.
+    </p>
+
     <template v-else>
       <p class="text-sm text-slate-600">
         Onayladığınızda hedef kitle o anki haliyle dondurulur; izinler bir kez daha kontrol edilir.
@@ -43,6 +51,16 @@ const summary = computed(() => {
         @click="store.approve()"
       >
         {{ store.approving ? 'Onaylanıyor…' : 'Kampanyayı onayla' }}
+      </button>
+      <button
+        v-if="store.campaign?.status === 'draft'"
+        type="button"
+        data-test="cancel-draft"
+        :disabled="store.cancelling || store.approving"
+        class="ml-3 rounded-md border border-red-200 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+        @click="store.cancelDraft()"
+      >
+        {{ store.cancelling ? 'İptal ediliyor…' : 'Kampanyayı iptal et' }}
       </button>
     </template>
   </section>

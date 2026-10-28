@@ -190,42 +190,54 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 // under a lease, and moves their Campaigns from `approved` to `sending`.
 // Only Campaigns that are `approved` or `sending` are claimed from, so a
 // cancelled Campaign (#16) gets no new claims.
+//
+// The claim takes FOR SHARE on each Campaign it claims from. A cancel that
+// commits while the claim runs therefore either waits for the claim (whose
+// Deliveries are then in flight and finish), or is seen by it: the share lock
+// re-reads the Campaign and drops its Deliveries. Once a cancel has
+// committed, no Delivery still `pending` is claimed.
+//
+// The approved -> sending move runs as its own statement after the claim
+// commits: two claims holding the share lock on the same Campaign (one per
+// Channel) would deadlock if each then updated it.
 func (w *Worker) claim(ctx context.Context, channel string) ([]delivery, error) {
-	var batch []delivery
-	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
-			WITH due AS (
-				SELECT d.id FROM deliveries d
-				JOIN campaigns c ON c.id = d.campaign_id
-				WHERE d.channel = $1 AND d.state = 'pending' AND d.next_attempt_at <= now()
-					AND c.status IN ('approved', 'sending')
-				ORDER BY d.next_attempt_at, d.id
-				LIMIT $2
-				FOR UPDATE OF d SKIP LOCKED
-			)
-			UPDATE deliveries d SET state = 'sending', attempt_count = d.attempt_count + 1,
-				lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
-			FROM due WHERE d.id = due.id
-			RETURNING d.id, d.campaign_id, d.payload, d.attempt_count`,
-			channel, w.opts.BatchSize, w.opts.Lease.Seconds())
-		if err != nil {
-			return err
-		}
-		batch, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (delivery, error) {
-			var d delivery
-			return d, r.Scan(&d.id, &d.campaignID, &d.payload, &d.attempt)
-		})
-		if err != nil || len(batch) == 0 {
-			return err
-		}
-		ids := make([]int64, 0, len(batch))
-		for _, d := range batch {
-			ids = append(ids, d.campaignID)
-		}
-		_, err = tx.Exec(ctx, `UPDATE campaigns SET status = 'sending' WHERE status = 'approved' AND id = ANY($1)`, ids)
-		return err
+	rows, err := w.pool.Query(ctx, `
+		WITH due AS (
+			SELECT d.id FROM deliveries d
+			JOIN campaigns c ON c.id = d.campaign_id
+			WHERE d.channel = $1 AND d.state = 'pending' AND d.next_attempt_at <= now()
+				AND c.status IN ('approved', 'sending')
+			ORDER BY d.next_attempt_at, d.id
+			LIMIT $2
+			FOR UPDATE OF d SKIP LOCKED
+			FOR SHARE OF c
+		)
+		UPDATE deliveries d SET state = 'sending', attempt_count = d.attempt_count + 1,
+			lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
+		FROM due WHERE d.id = due.id
+		RETURNING d.id, d.campaign_id, d.payload, d.attempt_count`,
+		channel, w.opts.BatchSize, w.opts.Lease.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	batch, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (delivery, error) {
+		var d delivery
+		return d, r.Scan(&d.id, &d.campaignID, &d.payload, &d.attempt)
 	})
-	return batch, err
+	if err != nil || len(batch) == 0 {
+		return batch, err
+	}
+	ids := make([]int64, 0, len(batch))
+	for _, d := range batch {
+		ids = append(ids, d.campaignID)
+	}
+	// The claim has committed, so the batch is sent even if this fails; the
+	// next claim moves the Campaign then.
+	if _, err := w.pool.Exec(context.WithoutCancel(ctx),
+		`UPDATE campaigns SET status = 'sending' WHERE status = 'approved' AND id = ANY($1)`, ids); err != nil {
+		log.Printf("worker: move Campaigns to sending: %v", err)
+	}
+	return batch, nil
 }
 
 // send makes one Attempt and records it in the Attempt log together with

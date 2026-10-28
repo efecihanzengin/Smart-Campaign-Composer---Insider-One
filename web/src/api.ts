@@ -262,6 +262,18 @@ export async function approveCampaign(id: number): Promise<Approval> {
   return body
 }
 
+// cancellable lists the statuses a Campaign can be cancelled from.
+export const cancellable = ['draft', 'approved', 'sending']
+
+// cancelCampaign stops a Campaign: nothing still pending is sent, and
+// Deliveries already in flight finish. It resolves to the new status.
+export async function cancelCampaign(id: number): Promise<string> {
+  const res = await fetch(`/api/campaigns/${id}/cancel`, { method: 'POST' })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(body?.error ?? `POST cancel: ${res.status}`)
+  return body.status
+}
+
 // ChannelCounts is a Channel's Deliveries by state; pending includes those in flight.
 export interface ChannelCounts {
   pending: number

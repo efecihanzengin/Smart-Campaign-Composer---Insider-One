@@ -3,6 +3,7 @@ import {
   ApiError,
   ApprovalRefused,
   approveCampaign,
+  cancelCampaign,
   channels,
   createCampaign,
   previewEmail,
@@ -56,6 +57,7 @@ export const useCampaignStore = defineStore('campaign', {
     approving: false,
     approval: null as Approval | null,
     approvalError: null as string | null,
+    cancelling: false,
     // regenerating is the Channel whose Content Claude is rewriting.
     regenerating: null as Channel | null,
     // lastRegeneration is the Channel regeneration a retry runs again.
@@ -362,6 +364,22 @@ export const useCampaignStore = defineStore('campaign', {
           e instanceof ApprovalRefused && e.reasons.length ? e.reasons.map((r) => r.message).join(' ') : message(e)
       } finally {
         this.approving = false
+      }
+    },
+
+    // cancelDraft cancels the draft Campaign; it can then no longer be edited
+    // or approved. An approved or sending Campaign is cancelled from the dashboard.
+    async cancelDraft() {
+      if (!this.campaign || this.campaign.status !== 'draft' || this.cancelling) return
+      this.cancelling = true
+      this.approvalError = null
+      try {
+        const status = await cancelCampaign(this.campaign.id)
+        this.campaign = { ...this.campaign, status }
+      } catch (e) {
+        this.approvalError = message(e)
+      } finally {
+        this.cancelling = false
       }
     },
   },

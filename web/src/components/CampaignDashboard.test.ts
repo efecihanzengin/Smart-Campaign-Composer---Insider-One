@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import CampaignDashboard from './CampaignDashboard.vue'
 
@@ -117,6 +117,51 @@ describe('Campaign dashboard', () => {
     await source().emit('dashboard', { campaigns: [] })
 
     expect(wrapper.find('[data-test="dashboard"]').exists()).toBe(false)
+  })
+
+  it('offers cancel only for approved and sending Campaigns', async () => {
+    const wrapper = mount(CampaignDashboard)
+    await source().emit('dashboard', {
+      campaigns: [
+        campaign({ id: 1, status: 'approved' }),
+        campaign({ id: 2, status: 'sending' }),
+        campaign({ id: 3, status: 'completed' }),
+        campaign({ id: 4, status: 'cancelled' }),
+      ],
+    })
+
+    const cancelButton = (id: number) => row(wrapper, id).find('[data-test="cancel"]').exists()
+    expect([1, 2, 3, 4].map(cancelButton)).toEqual([true, true, false, false])
+  })
+
+  it('cancels a sending Campaign and shows it cancelled with its final counts', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ id: 7, status: 'cancelled' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = mount(CampaignDashboard)
+    await source().emit('dashboard', { campaigns: [campaign()] })
+
+    await row(wrapper, 7).get('[data-test="cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/campaigns/7/cancel', { method: 'POST' })
+    expect(row(wrapper, 7).text()).toContain('İptal edildi')
+    expect(row(wrapper, 7).find('[data-test="cancel"]').exists()).toBe(false)
+    expect(counts(wrapper, 7, 'sms')).toContain('Bekleyen 300')
+    expect(counts(wrapper, 7, 'sms')).toContain('Gönderildi 112')
+  })
+
+  it('shows why a cancel was refused', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'Tamamlanmış bir kampanya iptal edilemez.' }), { status: 409 })),
+    )
+    const wrapper = mount(CampaignDashboard)
+    await source().emit('dashboard', { campaigns: [campaign()] })
+
+    await row(wrapper, 7).get('[data-test="cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(row(wrapper, 7).get('[data-test="cancel-error"]').text()).toContain('iptal edilemez')
   })
 
   it('closes the stream when it is unmounted', () => {
