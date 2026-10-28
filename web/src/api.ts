@@ -59,9 +59,18 @@ export interface Content {
   email?: EmailContent | null
 }
 
+// Length is how much of a field's limit Content uses once rendered with the
+// longest placeholder values in the Audience; encoding is set for SMS only.
+export interface Length {
+  encoding?: 'gsm7' | 'ucs2'
+  used: number
+  limit: number
+}
+
 export interface Validation {
   valid: boolean
   issues: { field: string; message: string }[]
+  usage?: Record<string, Length>
 }
 
 // ContentDelta is the Content parsed so far while it streams.
@@ -118,6 +127,33 @@ export async function setChannel(id: number, channel: Channel, enabled: boolean)
   const body = await res.json().catch(() => null)
   if (!res.ok) throw new ApiError(body?.error ?? `PUT channel: ${res.status}`)
   return body.enabled_channels
+}
+
+type ChannelContent = SmsContent | EmailContent
+
+// validateContent runs the backend's Content validator over unsaved Content.
+// The rules live only in the backend; the live counters come from here.
+export async function validateContent(id: number, channel: Channel, content: ChannelContent): Promise<Validation> {
+  const res = await fetch(`/api/campaigns/${id}/content/${channel}/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(content),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(body?.error ?? `POST validate: ${res.status}`)
+  return body
+}
+
+// updateContent saves the Marketer's edit and returns its validation.
+export async function updateContent(id: number, channel: Channel, content: ChannelContent): Promise<Validation> {
+  const res = await fetch(`/api/campaigns/${id}/content/${channel}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(content),
+  })
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(body?.error ?? `PUT content: ${res.status}`)
+  return body.validation
 }
 
 // previewEmail renders email Content into the backend's fixed HTML template.

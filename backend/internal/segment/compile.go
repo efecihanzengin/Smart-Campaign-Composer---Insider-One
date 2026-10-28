@@ -105,6 +105,27 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// Longest is the longest first name and city among one Channel's Audience,
+// empty when the Audience is.
+type Longest struct {
+	FirstName, City string
+}
+
+// LongestValues finds, per Channel, the longest placeholder values in the
+// rule's Audience (consent applied), the values Content lengths are checked
+// with (ADR-0002).
+func LongestValues(ctx context.Context, q Querier, rule Node) (sms, email Longest, err error) {
+	where, args := Compile(rule)
+	longest := func(column, consent string) string {
+		return `coalesce((SELECT r.` + column + ` FROM recipients r WHERE r.` + consent + ` AND ` + where +
+			` ORDER BY length(r.` + column + `) DESC, r.` + column + ` LIMIT 1), '')`
+	}
+	err = q.QueryRow(ctx, `SELECT `+longest("first_name", "sms_consent")+`, `+longest("city", "sms_consent")+`, `+
+		longest("first_name", "email_consent")+`, `+longest("city", "email_consent"), args...).
+		Scan(&sms.FirstName, &sms.City, &email.FirstName, &email.City)
+	return sms, email, err
+}
+
 // CountAudience counts the Recipients the rule reaches on each Channel,
 // limited to those who consented to that Channel (ADR-0004).
 func CountAudience(ctx context.Context, q Querier, rule Node) (Audience, error) {

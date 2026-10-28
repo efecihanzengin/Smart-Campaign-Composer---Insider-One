@@ -6,6 +6,8 @@ import {
   previewEmail,
   setChannel,
   streamContent,
+  updateContent,
+  validateContent,
   type Campaign,
   type Channel,
   type Content,
@@ -13,6 +15,10 @@ import {
 } from '../api'
 
 const unreachable = 'Sunucuya ulaşılamadı. Lütfen tekrar deneyin.'
+
+// validateDelay is how long typing must pause before the backend validator
+// is asked about an edit.
+export const validateDelay = 300
 
 const message = (e: unknown) => (e instanceof ApiError ? e.message : unreachable)
 
@@ -27,6 +33,10 @@ export const useCampaignStore = defineStore('campaign', {
     streaming: false,
     contentError: null as string | null,
     emailPreview: null as string | null,
+    // revisions count the Marketer's edits per Channel, so a slow validation
+    // answer for older text never overwrites a newer one.
+    revisions: { sms: 0, email: 0 } as Record<Channel, number>,
+    validateTimers: {} as Partial<Record<Channel, ReturnType<typeof setTimeout>>>,
   }),
   actions: {
     async create(brief: string) {
@@ -45,6 +55,10 @@ export const useCampaignStore = defineStore('campaign', {
     },
 
     resetContent() {
+      for (const c of channels) {
+        clearTimeout(this.validateTimers[c])
+        this.revisions[c]++
+      }
       this.content = {}
       this.enabledChannels = []
       this.validation = {}
@@ -86,6 +100,50 @@ export const useCampaignStore = defineStore('campaign', {
           this.emailPreview = await previewEmail(this.content.email)
         } catch {
           this.emailPreview = null
+        }
+      }
+    },
+
+    // edit applies the Marketer's change to one Channel's Content and asks the
+    // backend validator about it once typing pauses, for the live counters.
+    edit<C extends Channel>(channel: C, patch: Partial<NonNullable<Content[C]>>) {
+      if (this.streaming) return
+      this.content = { ...this.content, [channel]: { ...this.content[channel], ...patch } }
+      const revision = ++this.revisions[channel]
+      clearTimeout(this.validateTimers[channel])
+      this.validateTimers[channel] = setTimeout(() => this.runValidation(channel, revision), validateDelay)
+    },
+
+    async runValidation(channel: Channel, revision: number) {
+      const c = this.content[channel]
+      if (!this.campaign || !c) return
+      try {
+        const v = await validateContent(this.campaign.id, channel, c)
+        // A later keystroke's answer wins, whatever order the answers arrive in.
+        if (revision === this.revisions[channel]) this.validation = { ...this.validation, [channel]: v }
+      } catch (e) {
+        this.contentError = message(e)
+      }
+    },
+
+    // save stores the Marketer's edit of one Channel's Content.
+    async save(channel: Channel) {
+      const c = this.content[channel]
+      if (!this.campaign || !c || this.streaming) return
+      clearTimeout(this.validateTimers[channel])
+      const revision = this.revisions[channel]
+      try {
+        const v = await updateContent(this.campaign.id, channel, c)
+        if (revision === this.revisions[channel]) this.validation = { ...this.validation, [channel]: v }
+      } catch (e) {
+        this.contentError = message(e)
+        return
+      }
+      if (channel === 'email' && this.content.email) {
+        try {
+          this.emailPreview = await previewEmail(this.content.email)
+        } catch {
+          // The previous preview stays.
         }
       }
     },

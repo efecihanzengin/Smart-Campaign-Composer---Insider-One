@@ -158,17 +158,30 @@ type Issue struct {
 	Message string `json:"message"`
 }
 
-// Validation is the result of validating one Channel's Content.
+// Validation is the result of validating one Channel's Content. Usage holds,
+// per limited field, its length after rendering with the longest placeholder
+// values; it drives the live counters.
 type Validation struct {
-	Valid  bool    `json:"valid"`
-	Issues []Issue `json:"issues"`
+	Valid  bool              `json:"valid"`
+	Issues []Issue           `json:"issues"`
+	Usage  map[string]Length `json:"usage"`
 }
 
-func result(issues []Issue) Validation {
+func result(issues []Issue, usage map[string]Length) Validation {
 	if issues == nil {
 		issues = []Issue{}
 	}
-	return Validation{Valid: len(issues) == 0, Issues: issues}
+	if usage == nil {
+		usage = map[string]Length{}
+	}
+	return Validation{Valid: len(issues) == 0, Issues: issues, Usage: usage}
+}
+
+// Longest holds, per Channel, the longest placeholder values in that Channel's
+// Audience. Lengths are checked after rendering with them, so no Recipient's
+// message overflows (ADR-0002).
+type Longest struct {
+	SMS, Email Sample
 }
 
 // Email length limits, in characters.
@@ -178,24 +191,38 @@ const (
 	MaxEmailBody = 1500
 )
 
-// ValidateSMS checks SMS Content. Encoding-aware length limits are added with
-// the GSM-7 rules (ADR-0002).
-func ValidateSMS(s *SMS) Validation {
+// ValidateSMS checks SMS Content: once rendered with the longest placeholder
+// values it must fit in one segment of its encoding, 160 septets in GSM-7 or
+// 70 characters in UCS-2 (ADR-0002).
+func ValidateSMS(s *SMS, longest Sample) Validation {
 	if s == nil {
-		return result([]Issue{{Field: "body", Message: "SMS içeriği eksik."}})
+		return result([]Issue{{Field: "body", Message: "SMS içeriği eksik."}}, nil)
 	}
 	var issues []Issue
 	issues = append(issues, required("body", "SMS metni", s.Body)...)
 	issues = append(issues, placeholders("body", s.Body)...)
-	return result(issues)
+	length := MeasureSMS(RenderSMS(s.Body, longest))
+	switch {
+	case length.Used <= length.Limit:
+	case length.Encoding == GSM7:
+		issues = append(issues, Issue{Field: "body", Message: fmt.Sprintf(
+			"SMS tek parçaya sığmalı: GSM-7 ile en fazla %d karakter olabilir (şu an %d).", length.Limit, length.Used)})
+	default:
+		issues = append(issues, Issue{Field: "body", Message: fmt.Sprintf(
+			"SMS tek parçaya sığmalı: ş, ğ, ı, İ gibi harfler mesajı UCS-2'ye çevirir ve sınır %d karakter olur (şu an %d). "+
+				"Bu harfleri s, g, i, I olarak yazarsanız sınır 160 olur.", length.Limit, length.Used)})
+	}
+	return result(issues, map[string]Length{"body": length})
 }
 
-// ValidateEmail checks email Content against the field limits and placeholders.
-func ValidateEmail(e *Email) Validation {
+// ValidateEmail checks email Content against the field limits, once rendered
+// with the longest placeholder values, and the placeholders.
+func ValidateEmail(e *Email, longest Sample) Validation {
 	if e == nil {
-		return result([]Issue{{Field: "subject", Message: "E-posta içeriği eksik."}})
+		return result([]Issue{{Field: "subject", Message: "E-posta içeriği eksik."}}, nil)
 	}
 	var issues []Issue
+	usage := map[string]Length{}
 	for _, f := range []struct {
 		field, name, value string
 		max                int
@@ -205,24 +232,26 @@ func ValidateEmail(e *Email) Validation {
 		{"body", "Gövde", e.Body, MaxEmailBody},
 	} {
 		issues = append(issues, required(f.field, f.name, f.value)...)
-		if n := utf8.RuneCountInString(f.value); n > f.max {
+		n := utf8.RuneCountInString(longest.Render(f.value))
+		usage[f.field] = Length{Used: n, Limit: f.max}
+		if n > f.max {
 			issues = append(issues, Issue{Field: f.field, Message: fmt.Sprintf("%s en fazla %d karakter olabilir (şu an %d).", f.name, f.max, n)})
 		}
 		issues = append(issues, placeholders(f.field, f.value)...)
 	}
 	issues = append(issues, placeholders("cta_text", e.CTAText)...)
-	return result(issues)
+	return result(issues, usage)
 }
 
 // Validate checks the Content of every Channel in p.Channels.
-func Validate(p Proposal) map[string]Validation {
+func Validate(p Proposal, longest Longest) map[string]Validation {
 	out := map[string]Validation{}
 	for _, ch := range p.Channels {
 		switch ch {
 		case "sms":
-			out[ch] = ValidateSMS(p.SMS)
+			out[ch] = ValidateSMS(p.SMS, longest.SMS)
 		case "email":
-			out[ch] = ValidateEmail(p.Email)
+			out[ch] = ValidateEmail(p.Email, longest.Email)
 		}
 	}
 	return out

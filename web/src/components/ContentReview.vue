@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Channel, Validation } from '../api'
+import type { Channel, EmailContent, Length, Validation } from '../api'
 import { useCampaignStore } from '../stores/campaign'
 
 const store = useCampaignStore()
@@ -20,6 +20,28 @@ const emailValidation = computed<Validation | undefined>(() => store.validation.
 
 // The backend renders the preview with these sample values.
 const sampleNote = 'Örnek değerlerle: {{first_name}} = Ayşe, {{city}} = İstanbul'
+
+// The counters show what the backend validator measured; no limits are
+// computed here (ADR-0002).
+const smsUsage = computed<Length | undefined>(() => smsValidation.value?.usage?.body)
+const emailUsage = computed(() => emailValidation.value?.usage)
+
+const encodingNames = { gsm7: 'GSM-7', ucs2: 'UCS-2' }
+const ucs2Hint = 'ş, ğ, ı, İ gibi harfler SMS sınırını 160 yerine 70 karaktere düşürür.'
+
+const counterClass = (l: Length) => (l.used > l.limit ? 'font-medium text-red-700' : 'text-slate-500')
+
+const emailFields: { field: keyof EmailContent; test: string; label: string; multiline?: boolean }[] = [
+  { field: 'subject', test: 'subject', label: 'Konu' },
+  { field: 'preheader', test: 'preheader', label: 'Ön izleme metni' },
+  { field: 'body', test: 'body', label: 'Gövde', multiline: true },
+  { field: 'cta_text', test: 'cta', label: 'Buton metni (isteğe bağlı)' },
+]
+
+const inputValue = (e: Event) => (e.target as HTMLInputElement | HTMLTextAreaElement).value
+
+const inputClass =
+  'w-full rounded-md border border-slate-300 bg-white p-2 text-sm focus:border-slate-500 focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500'
 
 const fieldNames: Record<string, string> = {
   body: 'Metin',
@@ -59,7 +81,28 @@ const fieldNames: Record<string, string> = {
     <div class="grid gap-4 md:grid-cols-2">
       <article class="space-y-3 rounded-md border border-slate-200 p-4" :class="{ 'opacity-50': !enabled('sms') }">
         <h3 class="text-sm font-medium">SMS</h3>
-        <p v-if="sms" data-test="sms-body" class="whitespace-pre-wrap text-sm">{{ sms.body }}</p>
+        <div v-if="sms" class="space-y-1">
+          <label for="sms-body" class="sr-only">SMS metni</label>
+          <textarea
+            id="sms-body"
+            data-test="sms-body"
+            rows="5"
+            :value="sms.body"
+            :disabled="store.streaming"
+            :class="inputClass"
+            @input="store.edit('sms', { body: inputValue($event) })"
+            @change="store.save('sms')"
+          />
+          <p
+            v-if="smsUsage"
+            data-test="sms-counter"
+            class="text-right text-xs tabular-nums"
+            :class="counterClass(smsUsage)"
+            :title="smsUsage.encoding === 'ucs2' ? ucs2Hint : undefined"
+          >
+            {{ encodingNames[smsUsage.encoding ?? 'gsm7'] }} · {{ smsUsage.used }}/{{ smsUsage.limit }}
+          </p>
+        </div>
         <p v-else class="text-sm text-slate-400">{{ store.streaming ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
         <template v-if="smsValidation">
           <p v-if="smsValidation.valid" data-test="sms-valid" class="text-xs text-emerald-700">Kurallara uygun</p>
@@ -71,24 +114,32 @@ const fieldNames: Record<string, string> = {
 
       <article class="space-y-3 rounded-md border border-slate-200 p-4" :class="{ 'opacity-50': !enabled('email') }">
         <h3 class="text-sm font-medium">E-posta</h3>
-        <dl v-if="email" class="space-y-2 text-sm">
-          <div>
-            <dt class="text-xs text-slate-500">Konu</dt>
-            <dd data-test="email-subject">{{ email.subject }}</dd>
+        <div v-if="email" class="space-y-3 text-sm">
+          <div v-for="f in emailFields" :key="f.field" class="space-y-1">
+            <div class="flex items-baseline justify-between gap-2">
+              <label :for="`email-${f.test}`" class="text-xs text-slate-500">{{ f.label }}</label>
+              <span
+                v-if="emailUsage?.[f.field]"
+                :data-test="`email-${f.test}-counter`"
+                class="text-xs tabular-nums"
+                :class="counterClass(emailUsage[f.field])"
+              >
+                {{ emailUsage[f.field].used }}/{{ emailUsage[f.field].limit }}
+              </span>
+            </div>
+            <component
+              :is="f.multiline ? 'textarea' : 'input'"
+              :id="`email-${f.test}`"
+              :data-test="`email-${f.test}`"
+              :rows="f.multiline ? 8 : undefined"
+              :value="email[f.field] ?? ''"
+              :disabled="store.streaming"
+              :class="inputClass"
+              @input="store.edit('email', { [f.field]: inputValue($event) })"
+              @change="store.save('email')"
+            />
           </div>
-          <div>
-            <dt class="text-xs text-slate-500">Ön izleme metni</dt>
-            <dd data-test="email-preheader">{{ email.preheader }}</dd>
-          </div>
-          <div>
-            <dt class="text-xs text-slate-500">Gövde</dt>
-            <dd data-test="email-body" class="whitespace-pre-wrap">{{ email.body }}</dd>
-          </div>
-          <div v-if="email.cta_text">
-            <dt class="text-xs text-slate-500">Buton</dt>
-            <dd data-test="email-cta">{{ email.cta_text }}</dd>
-          </div>
-        </dl>
+        </div>
         <p v-else class="text-sm text-slate-400">{{ store.streaming ? 'Bekleniyor…' : 'Bu kanal için içerik yok.' }}</p>
         <template v-if="emailValidation">
           <p v-if="emailValidation.valid" data-test="email-valid" class="text-xs text-emerald-700">Kurallara uygun</p>

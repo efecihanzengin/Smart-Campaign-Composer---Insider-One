@@ -60,7 +60,13 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "Yalnızca taslak kampanyanın içeriği üretilebilir."})
 		return
 	}
-	labels, err := storedLabels(ruleJSON)
+	rule, err := storedRule(ruleJSON)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	labels := segment.Labels(rule)
+	longest, err := s.longest(ctx, rule)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -107,17 +113,17 @@ func (s *server) generateContent(w http.ResponseWriter, r *http.Request) {
 	sse.send("content.done", contentDone{
 		EnabledChannels: proposal.Channels,
 		Content:         contentView{SMS: proposal.SMS, Email: proposal.Email},
-		Validation:      content.Validate(proposal),
+		Validation:      content.Validate(proposal, longest),
 	})
 }
 
-// storedLabels renders a stored Segment Rule as labels for the Content call.
-func storedLabels(ruleJSON []byte) ([]string, error) {
+// storedRule decodes a Campaign's stored Segment Rule.
+func storedRule(ruleJSON []byte) (segment.Node, error) {
 	p, err := segment.ParseProposal(json.RawMessage(fmt.Sprintf(`{"rule": %s, "unsupported_criteria": []}`, ruleJSON)))
 	if err != nil {
 		return nil, fmt.Errorf("stored Segment Rule: %w", err)
 	}
-	return segment.Labels(p.Rule), nil
+	return p.Rule, nil
 }
 
 // saveContent replaces the Campaign's Content with the proposal's and enables
