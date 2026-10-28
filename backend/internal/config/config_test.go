@@ -41,6 +41,17 @@ func TestUnsetWorkerTuningLeavesTheWorkerDefaults(t *testing.T) {
 	}
 }
 
+func TestTheLeaseComesFromTheEnvironment(t *testing.T) {
+	t.Setenv("WORKER_LEASE_MS", "1200")
+	if got := config.FromEnv().Lease; got != 1200*time.Millisecond {
+		t.Errorf("lease = %v, want 1.2s", got)
+	}
+	t.Setenv("WORKER_LEASE_MS", "")
+	if got := config.FromEnv().Lease; got != 0 {
+		t.Errorf("unset lease = %v, want zero (worker default)", got)
+	}
+}
+
 func TestMockLLMOnlyWithoutAKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	if !config.FromEnv().MockLLM() {

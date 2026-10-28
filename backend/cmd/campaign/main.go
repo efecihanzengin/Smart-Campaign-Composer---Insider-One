@@ -93,5 +93,6 @@ func runWorker(ctx context.Context, cfg config.Config) error {
 		BackoffBase: cfg.BackoffBase,
 		Timeout:     cfg.ProviderTimeout,
 		MaxAttempts: cfg.MaxAttempts,
+		Lease:       cfg.Lease,
 	}).Run(ctx)
 }

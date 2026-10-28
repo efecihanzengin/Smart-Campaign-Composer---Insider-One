@@ -36,7 +36,9 @@ type Options struct {
 	// Concurrency is how many requests a Channel has in flight at once.
 	Concurrency int
 	// Lease is how long a claimed Delivery is held before another worker may
-	// reclaim it (reclaiming arrives with #15).
+	// reclaim it (ADR-0006). It must be well above Timeout, or requests
+	// still in flight would be reclaimed: a Lease under twice the Timeout is
+	// raised to that.
 	Lease time.Duration
 	// Timeout bounds one Provider request.
 	Timeout time.Duration
@@ -81,7 +83,20 @@ func (o Options) withDefaults() Options {
 	if o.RateLimit <= 0 {
 		o.RateLimit = 100
 	}
+	if o.Lease < 2*o.Timeout {
+		o.Lease = 2 * o.Timeout
+	}
 	return o
+}
+
+// startWindow is how long after its claim a Delivery's request may still
+// start. A request takes at most Timeout, so one started within the window
+// is answered and recorded before the lease expires, with a quarter of the
+// rest of the lease to spare for the database writes. A Delivery whose turn
+// comes later (its batch was paced slower than planned) is handed back
+// instead of being sent under a lease that is about to run out.
+func (o Options) startWindow() time.Duration {
+	return (o.Lease - o.Timeout) * 3 / 4
 }
 
 // paceHeadroom paces requests 2% under RateLimit. Pacing exactly at the
@@ -102,6 +117,9 @@ type Worker struct {
 
 // New returns a Worker sending through the Provider at opts.ProviderURL.
 func New(pool *pgxpool.Pool, opts Options) *Worker {
+	if opts.Lease > 0 && opts.Lease < 2*opts.withDefaults().Timeout {
+		log.Printf("worker: lease %v is under twice the Provider timeout; using %v", opts.Lease, opts.withDefaults().Lease)
+	}
 	opts = opts.withDefaults()
 	buckets := make(map[string]*Bucket, len(Channels))
 	for _, ch := range Channels {
@@ -115,8 +133,10 @@ func New(pool *pgxpool.Pool, opts Options) *Worker {
 	}
 }
 
-// Run sends until ctx is cancelled. A request cut off by cancellation leaves
-// its Delivery in `sending`, to be reclaimed once its lease expires.
+// Run sends until ctx is cancelled. On the way out, claimed Deliveries are
+// handed back to `pending` (see send and release); a worker that dies
+// without that chance leaves them `sending` until their lease expires and
+// another worker reclaims them.
 func (w *Worker) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(Channels))
@@ -164,7 +184,8 @@ type delivery struct {
 // drainBatch claims one batch, sends it, and completes the Campaigns that
 // have nothing left to send. It returns how many Deliveries it claimed.
 func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
-	batch, err := w.claim(ctx, channel)
+	startBy := time.Now().Add(w.opts.startWindow())
+	batch, err := w.claim(ctx, channel, w.batchSize(channel))
 	if err != nil {
 		return 0, fmt.Errorf("claim: %w", err)
 	}
@@ -175,8 +196,13 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 		wg.Add(1)
 		go func() {
 			defer func() { <-sem; wg.Done() }()
-			// Shutting down: the claimed Delivery waits out its lease.
-			if w.buckets[channel].Wait(ctx) != nil {
+			wait, cancel := context.WithDeadline(ctx, startBy)
+			err := w.buckets[channel].Wait(wait)
+			cancel()
+			if err != nil || time.Now().After(startBy) {
+				// Shutting down, or the lease would run out mid-request:
+				// hand the Delivery back unsent.
+				w.release(context.WithoutCancel(ctx), d)
 				return
 			}
 			w.send(ctx, channel, d)
@@ -186,7 +212,15 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 	return len(batch), w.completeCampaigns(context.WithoutCancel(ctx))
 }
 
-// claim moves up to BatchSize due Deliveries of the Channel to `sending`
+// batchSize is how many Deliveries to claim: BatchSize, but no more than the
+// Channel's bucket lets through in half the start window at its current
+// rate, so a batch slowed by 429s (#14) is still sent within its lease.
+func (w *Worker) batchSize(channel string) int {
+	fit := int(w.buckets[channel].Rate() * w.opts.startWindow().Seconds() / 2)
+	return max(1, min(w.opts.BatchSize, fit))
+}
+
+// claim moves up to n due Deliveries of the Channel to `sending`
 // under a lease, and moves their Campaigns from `approved` to `sending`.
 // Only Campaigns that are `approved` or `sending` are claimed from, so a
 // cancelled Campaign (#16) gets no new claims.
@@ -200,12 +234,19 @@ func (w *Worker) drainBatch(ctx context.Context, channel string) (int, error) {
 // The approved -> sending move runs as its own statement after the claim
 // commits: two claims holding the share lock on the same Campaign (one per
 // Channel) would deadlock if each then updated it.
-func (w *Worker) claim(ctx context.Context, channel string) ([]delivery, error) {
+//
+// Deliveries left `sending` past their lease (their worker died or stalled)
+// are claimed again like due `pending` ones. The claim raises
+// attempt_count, which is what tells the stalled worker, should it wake up,
+// that the Delivery is no longer its own (see send).
+func (w *Worker) claim(ctx context.Context, channel string, n int) ([]delivery, error) {
 	rows, err := w.pool.Query(ctx, `
 		WITH due AS (
 			SELECT d.id FROM deliveries d
 			JOIN campaigns c ON c.id = d.campaign_id
-			WHERE d.channel = $1 AND d.state = 'pending' AND d.next_attempt_at <= now()
+			WHERE d.channel = $1
+				AND ((d.state = 'pending' AND d.next_attempt_at <= now())
+					OR (d.state = 'sending' AND d.lease_expires_at < now()))
 				AND c.status IN ('approved', 'sending')
 			ORDER BY d.next_attempt_at, d.id
 			LIMIT $2
@@ -216,7 +257,7 @@ func (w *Worker) claim(ctx context.Context, channel string) ([]delivery, error) 
 			lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
 		FROM due WHERE d.id = due.id
 		RETURNING d.id, d.campaign_id, d.payload, d.attempt_count`,
-		channel, w.opts.BatchSize, w.opts.Lease.Seconds())
+		channel, n, w.opts.Lease.Seconds())
 	if err != nil {
 		return nil, err
 	}
@@ -247,11 +288,17 @@ func (w *Worker) claim(ctx context.Context, channel string) ([]delivery, error) 
 func (w *Worker) send(ctx context.Context, channel string, d delivery) {
 	started := time.Now()
 	res, err := w.post(ctx, channel, d)
-	if ctx.Err() != nil && err != nil {
-		return // Shutting down: the lease hands the Delivery to the next worker.
-	}
 	latency := time.Since(started)
 	out := classify(res, err, d.attempt, w.opts.MaxAttempts)
+	// Shutting down cut the request off. It may have reached the Provider,
+	// so it is logged as an Attempt, and the Delivery goes straight back to
+	// `pending` for the next worker instead of waiting out its lease; the
+	// Idempotency-Key makes the repeat harmless.
+	cutOff := err != nil && ctx.Err() != nil
+	if cutOff {
+		out = outcomeRetry
+		err = fmt.Errorf("cut off by worker shutdown: %w", err)
+	}
 
 	var statusCode *int
 	errText := ""
@@ -264,6 +311,10 @@ func (w *Worker) send(ctx context.Context, channel string, d delivery) {
 		}
 	}
 
+	// The Attempt is logged whatever happens: it was a real request. The
+	// Delivery is only updated while this claim still holds it: once its
+	// lease expired and another worker reclaimed it, attempt_count has moved
+	// on, and that worker's outcome is the one that counts.
 	db := context.WithoutCancel(ctx)
 	txErr := pgx.BeginFunc(db, w.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(db, `INSERT INTO attempts (delivery_id, number, status_code, latency_ms, error, outcome, started_at)
@@ -275,23 +326,37 @@ func (w *Worker) send(ctx context.Context, channel string, d delivery) {
 		switch out {
 		case outcomeSent:
 			_, err = tx.Exec(db, `UPDATE deliveries SET state = 'sent', lease_expires_at = NULL, updated_at = now()
-				WHERE id = $1 AND state = 'sending'`, d.id)
+				WHERE id = $1 AND state = 'sending' AND attempt_count = $2`, d.id, d.attempt)
 		case outcomeFailed:
 			_, err = tx.Exec(db, `UPDATE deliveries SET state = 'failed', lease_expires_at = NULL, updated_at = now()
-				WHERE id = $1 AND state = 'sending'`, d.id)
+				WHERE id = $1 AND state = 'sending' AND attempt_count = $2`, d.id, d.attempt)
 		default:
 			delay := w.backoff(d.attempt)
+			if cutOff {
+				delay = 0
+			}
 			if res.retryAfter > delay {
 				delay = res.retryAfter
 			}
 			_, err = tx.Exec(db, `UPDATE deliveries SET state = 'pending', lease_expires_at = NULL,
-				next_attempt_at = now() + make_interval(secs => $2), updated_at = now()
-				WHERE id = $1 AND state = 'sending'`, d.id, delay.Seconds())
+				next_attempt_at = now() + make_interval(secs => $3), updated_at = now()
+				WHERE id = $1 AND state = 'sending' AND attempt_count = $2`, d.id, d.attempt, delay.Seconds())
 		}
 		return err
 	})
 	if txErr != nil {
 		log.Printf("worker: record Attempt %d of Delivery %d: %v", d.attempt, d.id, txErr)
+	}
+}
+
+// release hands a claimed Delivery back to `pending` without an Attempt, so
+// its claim does not count against MaxAttempts. Like send's updates it only
+// applies while this claim still holds the Delivery.
+func (w *Worker) release(ctx context.Context, d delivery) {
+	if _, err := w.pool.Exec(ctx, `UPDATE deliveries SET state = 'pending', attempt_count = attempt_count - 1,
+			lease_expires_at = NULL, updated_at = now()
+		WHERE id = $1 AND state = 'sending' AND attempt_count = $2`, d.id, d.attempt); err != nil {
+		log.Printf("worker: release Delivery %d: %v", d.id, err)
 	}
 }
 

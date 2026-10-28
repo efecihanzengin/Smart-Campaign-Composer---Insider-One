@@ -24,6 +24,10 @@ type Config struct {
 	BackoffBase     time.Duration
 	ProviderTimeout time.Duration
 	MaxAttempts     int
+	// Lease is how long a claimed Delivery is held before another worker may
+	// reclaim it. Zero leaves the worker's default of 30s; the worker raises
+	// it to at least twice the Provider timeout.
+	Lease time.Duration
 }
 
 func FromEnv() Config {
@@ -34,9 +38,10 @@ func FromEnv() Config {
 		AnthropicModel:  env("ANTHROPIC_MODEL", DefaultModel),
 		ProviderURL:     env("PROVIDER_URL", "http://localhost:8081"),
 		RateLimit:       positiveFloat("RATE_LIMIT_PER_SECOND", 100),
-		BackoffBase:    time.Duration(positiveInt("WORKER_BACKOFF_BASE_MS")) * time.Millisecond,
+		BackoffBase:     time.Duration(positiveInt("WORKER_BACKOFF_BASE_MS")) * time.Millisecond,
 		ProviderTimeout: time.Duration(positiveInt("WORKER_PROVIDER_TIMEOUT_MS")) * time.Millisecond,
 		MaxAttempts:     positiveInt("WORKER_MAX_ATTEMPTS"),
+		Lease:           time.Duration(positiveInt("WORKER_LEASE_MS")) * time.Millisecond,
 	}
 }
 

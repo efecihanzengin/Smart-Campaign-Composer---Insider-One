@@ -47,6 +47,7 @@ services:
       WORKER_BACKOFF_BASE_MS: ${WORKER_BACKOFF_BASE_MS:-}
       WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-}
       WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-}
+      WORKER_LEASE_MS: ${WORKER_LEASE_MS:-}
     depends_on:
       api:
         # The API runs migrations and the seed before it reports healthy.
