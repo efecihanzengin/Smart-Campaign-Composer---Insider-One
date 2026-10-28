@@ -14,6 +14,7 @@ import {
   type Campaign,
   type Channel,
   type Content,
+  type RepairNotice,
   type Validation,
 } from '../api'
 
@@ -30,13 +31,19 @@ const channelNames: Record<Channel, string> = { sms: 'SMS', email: 'E-posta' }
 export const useCampaignStore = defineStore('campaign', {
   state: () => ({
     campaign: null as Campaign | null,
+    brief: '',
     generating: false,
     error: null as string | null,
+    // retryable marks an error that another try may fix.
+    retryable: false,
     content: {} as Content,
     enabledChannels: [] as Channel[],
     validation: {} as Partial<Record<Channel, Validation>>,
     streaming: false,
     contentError: null as string | null,
+    contentRetryable: false,
+    // repairing is set while Claude repairs rejected Content (ADR-0005).
+    repairing: null as RepairNotice | null,
     emailPreview: null as string | null,
     // revisions count the Marketer's edits per Channel, so a slow validation
     // answer for older text never overwrites a newer one.
@@ -72,14 +79,17 @@ export const useCampaignStore = defineStore('campaign', {
   },
   actions: {
     async create(brief: string) {
+      this.brief = brief
       this.generating = true
       this.error = null
+      this.retryable = false
       this.campaign = null
       this.resetContent()
       try {
         this.campaign = await createCampaign(brief)
       } catch (e) {
         this.error = message(e)
+        this.retryable = e instanceof ApiError ? e.retryable : true
       } finally {
         this.generating = false
       }
@@ -98,10 +108,18 @@ export const useCampaignStore = defineStore('campaign', {
       this.enabledChannels = []
       this.validation = {}
       this.contentError = null
+      this.contentRetryable = false
       this.emailPreview = null
       this.unsaved = { sms: false, email: false }
       this.approval = null
       this.approvalError = null
+    },
+
+    // retry runs the failed step again: the Segment call if no Campaign was
+    // created, otherwise the Content call.
+    async retry() {
+      if (this.campaign) await this.generateContent()
+      else if (this.brief) await this.create(this.brief)
     },
 
     // generateContent streams the Content onto the screen as Claude writes it.
@@ -120,20 +138,31 @@ export const useCampaignStore = defineStore('campaign', {
                 )
               }
               break
+            case 'content.repair':
+              // The rejected text is dropped; the repaired attempt streams anew.
+              this.resetContent()
+              this.repairing = e.data
+              break
             case 'content.done':
+              this.repairing = null
               this.content = e.data.content
               this.enabledChannels = e.data.enabled_channels
               this.validation = e.data.validation
               break
             case 'error':
+              // No invalid output is left on screen as a proposal.
+              this.resetContent()
               this.contentError = e.data.error
+              this.contentRetryable = e.data.retryable === true
               break
           }
         })
       } catch (e) {
         this.contentError = message(e)
+        this.contentRetryable = true
       } finally {
         this.streaming = false
+        this.repairing = null
       }
       if (this.content.email && !this.contentError) {
         try {

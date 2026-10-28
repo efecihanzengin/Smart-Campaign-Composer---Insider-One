@@ -211,73 +211,61 @@ func TestOnlyTheChannelsClaudeInfersAreEnabled(t *testing.T) {
 	}
 }
 
-func TestEmailContentOverTheLimitsOrWithUnknownPlaceholdersIsReportedInvalid(t *testing.T) {
-	m := scriptedContent(`{"channels": ["sms", "email"], "sms": {"body": "Merhaba {{name}}"},`,
-		`"email": {"subject": "`+strings.Repeat("a", 81)+`", "preheader": "`+strings.Repeat("b", 121)+
-			`", "body": "Merhaba {{last_name}}, {{city}} {{first_name}}"}}`)
-	srv := startAPI(t, httpapi.Options{LLM: m})
-	c := createCampaign(t, srv.URL, exampleBrief)
+func TestContentOverTheLimitsOrWithUnknownPlaceholdersIsSentBackWithEveryIssue(t *testing.T) {
+	invalid := `{"channels": ["sms", "email"], "sms": {"body": "Merhaba {{name}}"}, "email": {"subject": "` +
+		strings.Repeat("a", 81) + `", "preheader": "` + strings.Repeat("b", 121) +
+		`", "body": "Merhaba {{last_name}}, {{city}} {{first_name}}"}}`
+	script := &contentScript{answers: []string{invalid, smsOnly("Merhaba {{first_name}}")}}
+	baseURL := repairAPI(t, script)
+	c := createCampaign(t, baseURL, exampleBrief)
 
-	done := lastDone(t, streamContent(t, srv.URL, c.ID))
+	events := streamContent(t, baseURL, c.ID)
 
-	email := done.Validation["email"]
-	if email.Valid {
-		t.Fatalf("email validation = valid, want invalid")
+	lastDone(t, events)
+	notices := repairNotices(t, events)
+	if len(notices) != 1 {
+		t.Fatalf("repair notices = %+v, want one", notices)
 	}
-	fields := map[string]string{}
-	perField := map[string]int{}
-	for _, i := range email.Issues {
-		fields[i.Field] += i.Message
-		perField[i.Field]++
+	perField := map[string][]string{}
+	for _, e := range notices[0].Errors {
+		field, msg, _ := strings.Cut(e, ": ")
+		perField[field] = append(perField[field], msg)
 	}
-	if perField["body"] != 1 {
-		t.Errorf("body has %d issues (%q), want one", perField["body"], fields["body"])
+	for field, want := range map[string]string{
+		"email.subject":   "80",
+		"email.preheader": "120",
+		"email.body":      "{{last_name}}",
+		"sms.body":        "{{name}}",
+	} {
+		if msgs := perField[field]; len(msgs) != 1 || !strings.Contains(msgs[0], want) {
+			t.Errorf("%s issues = %q, want one naming %s", field, msgs, want)
+		}
 	}
-	if !strings.Contains(fields["subject"], "80") {
-		t.Errorf("subject issue = %q, want the 80 character limit", fields["subject"])
-	}
-	if !strings.Contains(fields["preheader"], "120") {
-		t.Errorf("preheader issue = %q, want the 120 character limit", fields["preheader"])
-	}
-	if !strings.Contains(fields["body"], "{{last_name}}") {
-		t.Errorf("body issue = %q, want {{last_name}} reported", fields["body"])
-	}
-	sms := done.Validation["sms"]
-	if sms.Valid || len(sms.Issues) != 1 || !strings.Contains(sms.Issues[0].Message, "{{name}}") {
-		t.Errorf("sms validation = %+v, want one issue for {{name}}", sms)
+	if !slices.Equal(script.requests[1].Repair.Errors, notices[0].Errors) {
+		t.Errorf("repair prompt errors = %q, want the notice's %q", script.requests[1].Repair.Errors, notices[0].Errors)
 	}
 }
 
 func TestEmailBodyLimitIsFifteenHundredCharacters(t *testing.T) {
 	atLimit := strings.Repeat("ş", 1500)
 	for _, tc := range []struct {
-		body  string
-		valid bool
-	}{{atLimit, true}, {atLimit + "ş", false}} {
-		m := scriptedContent(`{"channels": ["email"], "email": {"subject": "s", "preheader": "p", "body": "` + tc.body + `"}}`)
-		srv := startAPI(t, httpapi.Options{LLM: m})
-		c := createCampaign(t, srv.URL, exampleBrief)
+		body    string
+		repairs int
+	}{{atLimit, 0}, {atLimit + "ş", 1}} {
+		email := `{"channels": ["email"], "email": {"subject": "s", "preheader": "p", "body": "` + tc.body + `"}}`
+		valid := `{"channels": ["email"], "email": {"subject": "s", "preheader": "p", "body": "b"}}`
+		baseURL := repairAPI(t, &contentScript{answers: []string{email, valid}})
+		c := createCampaign(t, baseURL, exampleBrief)
 
-		done := lastDone(t, streamContent(t, srv.URL, c.ID))
-		if got := done.Validation["email"].Valid; got != tc.valid {
-			t.Errorf("body of %d characters: valid = %v, want %v", len([]rune(tc.body)), got, tc.valid)
+		events := streamContent(t, baseURL, c.ID)
+		lastDone(t, events)
+		notices := repairNotices(t, events)
+		if len(notices) != tc.repairs {
+			t.Errorf("body of %d characters: %d repairs, want %d", len([]rune(tc.body)), len(notices), tc.repairs)
 		}
-	}
-}
-
-func TestMalformedContentEndsTheStreamWithAnError(t *testing.T) {
-	srv := startAPI(t, httpapi.Options{LLM: scriptedContent(`{"channels": ["sms"], "sms": {"body": "Mer`)})
-	c := createCampaign(t, srv.URL, exampleBrief)
-
-	events := streamContent(t, srv.URL, c.ID)
-
-	last := events[len(events)-1]
-	if last.Name != "error" {
-		t.Fatalf("last event = %s, want error", last.Name)
-	}
-	var body struct{ Error string }
-	if err := json.Unmarshal(last.Data, &body); err != nil || body.Error == "" {
-		t.Errorf("error event = %s, want a message", last.Data)
+		if tc.repairs > 0 && !strings.Contains(strings.Join(notices[0].Errors, ""), "1500") {
+			t.Errorf("repair errors = %q, want the 1500 character limit", notices[0].Errors)
+		}
 	}
 }
 

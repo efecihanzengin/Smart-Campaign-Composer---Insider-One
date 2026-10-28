@@ -27,7 +27,23 @@ type ContentRequest struct {
 	// AudienceLabels describe the Segment Rule in readable Turkish, so the copy
 	// fits the people it is written for.
 	AudienceLabels []string
+	// Repair is set when the call retries a rejected output (ADR-0005).
+	Repair *Repair
 }
+
+// Repair tells Claude why its previous output was rejected, so the retried
+// call can fix it.
+type Repair struct {
+	// Previous is the rejected tool input as Claude wrote it; it may be
+	// malformed or empty.
+	Previous string
+	// Errors are the backend validator's messages.
+	Errors []string
+}
+
+// MaxRepairs is how many times a rejected output is sent back to Claude
+// before the failure reaches the Marketer (ADR-0005).
+const MaxRepairs = 2
 
 // ContentInstructions is the system prompt of the Content call. It states the
 // rules the backend validates, so a well-behaved model rarely needs repair.
@@ -63,6 +79,8 @@ const ContentTool = `{
 // SegmentRequest is the input of the Segment call.
 type SegmentRequest struct {
 	Brief string
+	// Repair is set when the call retries a rejected output (ADR-0005).
+	Repair *Repair
 }
 
 // SegmentInstructions is the system prompt of the Segment call. It describes

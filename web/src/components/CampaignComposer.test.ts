@@ -105,4 +105,34 @@ describe('CampaignComposer', () => {
     expect(wrapper.get('[data-test="campaign-error"]').text()).toContain('geçersiz bir hedef kitle kuralı')
     expect(wrapper.find('[data-test="segment-label"]').exists()).toBe(false)
   })
+
+  it('offers a retry when the Segment Rule could not be repaired', async () => {
+    const fetchMock = mockCreate(
+      { error: 'Model geçerli bir hedef kitle kuralı üretemedi. Lütfen tekrar deneyin.', retryable: true },
+      502,
+    )
+    const wrapper = await submitBrief()
+    expect(wrapper.find('[data-test="segment-label"]').exists()).toBe(false)
+
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(campaign()), { status: 201, headers: { 'Content-Type': 'application/json' } }),
+    )
+    await wrapper.get('[data-test="campaign-retry"]').trigger('click')
+    await flushPromises()
+
+    const creates = fetchMock.mock.calls.filter(([url]) => url === '/api/campaigns')
+    expect(creates).toHaveLength(2)
+    expect(JSON.parse(creates[1][1].body)).toEqual({ brief: exampleBrief })
+    expect(wrapper.find('[data-test="campaign-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-test="segment-label"]')).toHaveLength(3)
+  })
+
+  it('offers no retry for an error that is not retryable', async () => {
+    mockCreate({ error: 'Kampanya talebi boş olamaz.' }, 400)
+
+    const wrapper = await submitBrief()
+
+    expect(wrapper.get('[data-test="campaign-error"]').text()).toContain('boş olamaz')
+    expect(wrapper.find('[data-test="campaign-retry"]').exists()).toBe(false)
+  })
 })

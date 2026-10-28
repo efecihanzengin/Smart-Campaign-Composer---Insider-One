@@ -28,15 +28,17 @@ type Validator = (channel: string, content: Record<string, string>) => unknown
 const alwaysValid: Validator = () => valid
 
 // mockApi answers the campaign, preview, channel and Content endpoints, and
-// returns a controller for the Content stream so a test decides when each
-// chunk arrives.
+// returns a controller for the latest Content stream so a test decides when
+// each chunk arrives. Every Content request opens a new stream.
 function mockApi(previewHtml = '<p>önizleme</p>', validator: Validator = alwaysValid) {
   let stream!: ReadableStreamDefaultController<Uint8Array>
-  const body = new ReadableStream<Uint8Array>({ start: (c) => void (stream = c) })
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { 'Content-Type': 'application/json' } })
     if (url === '/api/campaigns') return json(campaign)
-    if (url === '/api/campaigns/7/content') return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+    if (url === '/api/campaigns/7/content') {
+      const body = new ReadableStream<Uint8Array>({ start: (c) => void (stream = c) })
+      return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+    }
     if (url === '/api/email/preview') return new Response(previewHtml, { headers: { 'Content-Type': 'text/html' } })
     const content = url.match(/^\/api\/campaigns\/7\/content\/(\w+)(\/validate)?$/)
     if (content && content[2] && init?.method === 'POST') {
@@ -200,6 +202,51 @@ describe('Content review', () => {
     await api.end()
 
     expect(wrapper.get('[data-test="content-error"]').text()).toContain('geçersiz bir içerik')
+  })
+
+  it('shows a repair indicator while Claude repairs invalid Content, and drops the rejected text', async () => {
+    const api = mockApi()
+    const wrapper = await submit()
+    await api.send('content.delta', { channels: ['sms'], sms: { body: 'a'.repeat(172) } })
+
+    await api.send('content.repair', { repair: 1, max: 2, errors: ['sms.body: SMS tek parçaya sığmalı'] })
+
+    const indicator = wrapper.get('[data-test="content-repairing"]')
+    expect(indicator.text()).toContain('1/2')
+    expect(wrapper.find('[data-test="sms-body"]').exists()).toBe(false)
+
+    await api.send('content.delta', { channels: ['sms'], sms })
+    expect(wrapper.find('[data-test="content-repairing"]').exists()).toBe(true)
+    expect(value(wrapper, 'sms-body')).toBe(sms.body)
+
+    await api.send('content.done', { enabled_channels: ['sms'], content: { sms }, validation: { sms: valid }, repairs: 1 })
+    await api.end()
+    expect(wrapper.find('[data-test="content-repairing"]').exists()).toBe(false)
+    expect(value(wrapper, 'sms-body')).toBe(sms.body)
+  })
+
+  it('offers a retry when repairs are exhausted, showing no invalid Content', async () => {
+    const api = mockApi()
+    const wrapper = await submit()
+    await api.send('content.delta', { channels: ['sms'], sms: { body: 'Merhaba {{last_name}}' } })
+    await api.send('content.repair', { repair: 2, max: 2, errors: ['sms.body: Bilinmeyen yer tutucu'] })
+    await api.send('content.delta', { channels: ['sms'], sms: { body: 'Merhaba {{last_name}}' } })
+
+    await api.send('error', { error: 'Model geçerli bir içerik üretemedi. Lütfen tekrar deneyin.', retryable: true })
+    await api.end()
+
+    expect(wrapper.get('[data-test="content-error"]').text()).toContain('geçerli bir içerik üretemedi')
+    expect(wrapper.find('[data-test="sms-body"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="content-repairing"]').exists()).toBe(false)
+
+    await wrapper.get('[data-test="content-retry"]').trigger('click')
+    await flushPromises()
+    expect(calls(api, '/api/campaigns/7/content', 'POST')).toHaveLength(2)
+    expect(wrapper.find('[data-test="content-error"]').exists()).toBe(false)
+
+    await api.send('content.done', { enabled_channels: ['sms'], content: { sms }, validation: { sms: valid }, repairs: 0 })
+    await api.end()
+    expect(value(wrapper, 'sms-body')).toBe(sms.body)
   })
 })
 
