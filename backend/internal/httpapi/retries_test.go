@@ -23,13 +23,16 @@ func startScriptedProvider(t *testing.T, script provider.Script) *httptest.Serve
 }
 
 // fastRetries keeps backoff and the client timeout small so retry tests run
-// in milliseconds.
+// in milliseconds. The rate limit is set far out of reach: these scripts
+// throttle every Delivery, and the 429 slow-down (#14) would otherwise
+// stretch the test to minutes; pacing has its own tests.
 func fastRetries(providerURL string) worker.Options {
 	return worker.Options{
 		ProviderURL:  providerURL,
 		PollInterval: 5 * time.Millisecond,
 		BackoffBase:  time.Millisecond,
 		Timeout:      100 * time.Millisecond,
+		RateLimit:    1e6,
 	}
 }
 

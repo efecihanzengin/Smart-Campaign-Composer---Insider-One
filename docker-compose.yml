@@ -43,6 +43,7 @@ services:
     environment:
       DATABASE_URL: postgres://campaign:campaign@postgres:5432/campaign?sslmode=disable
       PROVIDER_URL: http://provider:8081
+      RATE_LIMIT_PER_SECOND: ${RATE_LIMIT_PER_SECOND:-}
       WORKER_BACKOFF_BASE_MS: ${WORKER_BACKOFF_BASE_MS:-}
       WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-}
       WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-}

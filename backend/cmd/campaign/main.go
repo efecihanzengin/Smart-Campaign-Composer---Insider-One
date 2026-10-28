@@ -86,9 +86,10 @@ func runWorker(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer pool.Close()
-	log.Printf("worker sending to the Provider at %s", cfg.ProviderURL)
+	log.Printf("worker sending to the Provider at %s, at most %v requests/s per Channel", cfg.ProviderURL, cfg.RateLimit)
 	return worker.New(pool, worker.Options{
 		ProviderURL: cfg.ProviderURL,
+		RateLimit:   cfg.RateLimit,
 		BackoffBase: cfg.BackoffBase,
 		Timeout:     cfg.ProviderTimeout,
 		MaxAttempts: cfg.MaxAttempts,
