@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
+import CampaignComposer from './components/CampaignComposer.vue'
 import { useOverviewStore } from './stores/overview'
 
 const store = useOverviewStore()
@@ -25,7 +26,7 @@ const recipientCount = computed(() =>
       </div>
     </header>
 
-    <main class="mx-auto max-w-5xl px-4 py-8">
+    <main class="mx-auto max-w-5xl space-y-8 px-4 py-8">
       <p v-if="store.failed" data-test="overview-error" class="rounded-md bg-red-50 p-4 text-red-700">
         Sunucuya ulaşılamadı. Lütfen daha sonra tekrar deneyin.
       </p>
@@ -36,6 +37,7 @@ const recipientCount = computed(() =>
         </p>
         <p v-else class="mt-1 text-slate-400">Yükleniyor…</p>
       </section>
+      <CampaignComposer v-if="!store.failed" />
     </main>
   </div>
 </template>

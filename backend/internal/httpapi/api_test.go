@@ -19,13 +19,30 @@ import (
 // startup and serves the HTTP API in-process.
 func startAPI(t *testing.T, opts httpapi.Options) *httptest.Server {
 	t.Helper()
+	srv, _ := startAPIWithPool(t, opts)
+	return srv
+}
+
+// startAPIWithPool is startAPI that also returns the database, for tests that
+// compare API answers with direct queries over the seed.
+func startAPIWithPool(t *testing.T, opts httpapi.Options) (*httptest.Server, *pgxpool.Pool) {
+	t.Helper()
 	pool := testenv.NewDatabase(t)
 	if err := app.Bootstrap(context.Background(), pool, time.Now()); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	srv := httptest.NewServer(httpapi.NewHandler(pool, opts))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, pool
+}
+
+// queryRow scans one row and fails the test on error, so a broken query can't
+// masquerade as a zero count.
+func queryRow(t *testing.T, pool *pgxpool.Pool, sql string, args []any, dest ...any) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(), sql, args...).Scan(dest...); err != nil {
+		t.Fatalf("%s: %v", sql, err)
+	}
 }
 
 func getJSON(t *testing.T, url string, into any) int {

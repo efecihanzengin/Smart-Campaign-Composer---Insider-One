@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"campaigncomposer/internal/llm"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -17,6 +19,8 @@ type Options struct {
 	// mock LLM stands in for Claude.
 	MockLLM bool
 	Model   string
+	// LLM answers the Segment call; nil means the scripted mock.
+	LLM llm.LLM
 }
 
 type server struct {
@@ -26,10 +30,14 @@ type server struct {
 
 // NewHandler returns the API's HTTP handler.
 func NewHandler(pool *pgxpool.Pool, opts Options) http.Handler {
+	if opts.LLM == nil {
+		opts.LLM = llm.NewMock()
+	}
 	s := &server{pool: pool, opts: opts}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /api/overview", s.overview)
+	mux.HandleFunc("POST /api/campaigns", s.createCampaign)
 	return mux
 }
 
