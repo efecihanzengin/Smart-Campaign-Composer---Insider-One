@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useCampaignStore } from '../stores/campaign'
+import ContentReview from './ContentReview.vue'
 
 const exampleBrief =
   "Son 30 günde sepetine ürün ekleyip alışveriş yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
@@ -83,5 +84,7 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
       </dl>
       <p class="text-xs text-slate-500">Sayılar yalnızca o kanal için izin vermiş alıcıları içerir.</p>
     </section>
+
+    <ContentReview v-if="store.campaign" />
   </div>
 </template>
