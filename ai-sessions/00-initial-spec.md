@@ -1,5 +1,7 @@
 # AI session 00 — Initial spec
 
+<!-- session: d7fcc0fb-16e3-48ba-bcb5-932e0f414676 -->
+
 Claude Code session export (desktop app). Thinking blocks and internal UI tool calls are omitted; tool outputs are truncated; secrets and personal data are redacted.
 
 ---

@@ -4,7 +4,7 @@ Usage: python3 -I scripts/transcript_to_md.py <transcript.jsonl> <out.md> "<titl
 
 Transcripts live in ~/.claude/projects/<project-dir>/<session-id>.jsonl. Personal data to redact
 (name, email, username, home directory) is read from git config and the environment at run time,
-so none of it is stored in this script.
+so none of it is stored in this script. Extra terms go in SCRUB_TERMS or the gitignored .scrub-terms file.
 """
 import getpass
 import json
@@ -36,8 +36,11 @@ def build_redactions():
         for part in name.split():
             if len(part) >= 3:
                 rules.append((re.compile(re.escape(part)), "[redacted name]"))
-    # Extra terms (e.g. another email's local part) come from SCRUB_TERMS="a,b" so they never live in the repo.
+    # Extra terms (e.g. another email's local part) come from SCRUB_TERMS="a,b" and from the gitignored
+    # .scrub-terms file (one per line, # for comments), so they never live in the repo.
     extra = [t.strip() for t in os.environ.get("SCRUB_TERMS", "").split(",") if t.strip()]
+    if os.path.exists(".scrub-terms"):
+        extra += [l.strip() for l in open(".scrub-terms") if l.strip() and not l.lstrip().startswith("#")]
     for email_local in [git_config("user.email").partition("@")[0]] + extra:
         if not email_local:
             continue
@@ -124,7 +127,8 @@ def describe_tool(block):
 def main(src, dst, title):
     records = [json.loads(line) for line in open(src)]
     pending = {}  # tool_use_id -> tool name, for pairing results
-    out = [f"# {title}", "",
+    session_id = os.path.splitext(os.path.basename(src))[0]
+    out = [f"# {title}", "", f"<!-- session: {session_id} -->", "",
            "Claude Code session export (desktop app). Thinking blocks and internal UI tool calls are omitted; "
            "tool outputs are truncated; secrets and personal data are redacted.", ""]
     last_role = None

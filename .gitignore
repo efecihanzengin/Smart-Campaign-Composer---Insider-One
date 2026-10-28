@@ -1,3 +1,5 @@
 .env
 node_modules/
 web/dist/
+.scrub-terms
+.claude/settings.local.json
