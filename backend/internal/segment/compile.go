@@ -102,7 +102,29 @@ type Audience struct {
 
 // Querier is satisfied by a pool, a connection or a transaction.
 type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// Longest is the longest first name and city among one Channel's Audience,
+// empty when the Audience is.
+type Longest struct {
+	FirstName, City string
+}
+
+// LongestValues finds, per Channel, the longest placeholder values in the
+// rule's Audience (consent applied), the values Content lengths are checked
+// with (ADR-0002).
+func LongestValues(ctx context.Context, q Querier, rule Node) (sms, email Longest, err error) {
+	where, args := Compile(rule)
+	longest := func(column, consent string) string {
+		return `coalesce((SELECT r.` + column + ` FROM recipients r WHERE r.` + consent + ` AND ` + where +
+			` ORDER BY length(r.` + column + `) DESC, r.` + column + ` LIMIT 1), '')`
+	}
+	err = q.QueryRow(ctx, `SELECT `+longest("first_name", "sms_consent")+`, `+longest("city", "sms_consent")+`, `+
+		longest("first_name", "email_consent")+`, `+longest("city", "email_consent"), args...).
+		Scan(&sms.FirstName, &sms.City, &email.FirstName, &email.City)
+	return sms, email, err
 }
 
 // CountAudience counts the Recipients the rule reaches on each Channel,
@@ -113,4 +135,34 @@ func CountAudience(ctx context.Context, q Querier, rule Node) (Audience, error) 
 	err := q.QueryRow(ctx, `SELECT count(*) FILTER (WHERE r.sms_consent), count(*) FILTER (WHERE r.email_consent)
 		FROM recipients r WHERE `+where, args...).Scan(&a.SMS, &a.Email)
 	return a, err
+}
+
+// Member is one Recipient of an Audience, with what a Delivery to them needs.
+type Member struct {
+	ID                     int64
+	FirstName, City, Phone string
+	Email                  string
+}
+
+// consentColumn is the consent flag of each Channel (ADR-0004).
+var consentColumn = map[string]string{"sms": "r.sms_consent", "email": "r.email_consent"}
+
+// Members lists the rule's Audience on one Channel, consent applied, as it is
+// at this moment: approval freezes it from this.
+func Members(ctx context.Context, tx pgx.Tx, rule Node, channel string) ([]Member, error) {
+	consent, ok := consentColumn[channel]
+	if !ok {
+		return nil, fmt.Errorf("segment: unknown Channel %q", channel)
+	}
+	where, args := Compile(rule)
+	rows, err := tx.Query(ctx, `SELECT r.id, r.first_name, r.city, r.phone, r.email FROM recipients r
+		WHERE `+consent+` AND `+where+` ORDER BY r.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Member, error) {
+		var m Member
+		err := row.Scan(&m.ID, &m.FirstName, &m.City, &m.Phone, &m.Email)
+		return m, err
+	})
 }

@@ -43,6 +43,11 @@ services:
     environment:
       DATABASE_URL: postgres://campaign:campaign@postgres:5432/campaign?sslmode=disable
       PROVIDER_URL: http://provider:8081
+      RATE_LIMIT_PER_SECOND: ${RATE_LIMIT_PER_SECOND:-}
+      WORKER_BACKOFF_BASE_MS: ${WORKER_BACKOFF_BASE_MS:-}
+      WORKER_PROVIDER_TIMEOUT_MS: ${WORKER_PROVIDER_TIMEOUT_MS:-}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-}
+      WORKER_LEASE_MS: ${WORKER_LEASE_MS:-}
     depends_on:
       api:
         # The API runs migrations and the seed before it reports healthy.
@@ -56,6 +61,14 @@ services:
     command: ["provider"]
     environment:
       HTTP_ADDR: :8081
+      PROVIDER_RATE_429: ${PROVIDER_RATE_429:-}
+      PROVIDER_RATE_5XX: ${PROVIDER_RATE_5XX:-}
+      PROVIDER_RATE_SLOW: ${PROVIDER_RATE_SLOW:-}
+      PROVIDER_RETRY_AFTER: ${PROVIDER_RETRY_AFTER:-}
+      PROVIDER_SLOW_MS: ${PROVIDER_SLOW_MS:-}
+      PROVIDER_LATENCY_MIN_MS: ${PROVIDER_LATENCY_MIN_MS:-}
+      PROVIDER_LATENCY_MAX_MS: ${PROVIDER_LATENCY_MAX_MS:-}
+      PROVIDER_SEED: ${PROVIDER_SEED:-}
     restart: unless-stopped
 
   web:

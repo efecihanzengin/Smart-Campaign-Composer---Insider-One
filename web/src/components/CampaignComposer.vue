@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useCampaignStore } from '../stores/campaign'
+import ApprovalPanel from './ApprovalPanel.vue'
+import ContentReview from './ContentReview.vue'
+import RegenerateControl from './RegenerateControl.vue'
 
 const exampleBrief =
   "Son 30 günde sepetine ürün ekleyip alışveriş yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
@@ -38,9 +41,34 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
       </button>
     </form>
 
-    <p v-if="store.error" data-test="campaign-error" class="rounded-md bg-red-50 p-4 text-sm text-red-700">
-      {{ store.error }}
+    <p
+      v-if="store.segmentRepairing"
+      data-test="segment-repairing"
+      role="status"
+      class="rounded-md bg-amber-50 p-3 text-sm text-amber-800"
+    >
+      Kurallara uymayan hedef kitle kuralı düzeltiliyor ({{ store.segmentRepairing.repair }}/{{
+        store.segmentRepairing.max
+      }})…
     </p>
+
+    <div
+      v-if="store.error"
+      data-test="campaign-error"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-red-50 p-4 text-sm text-red-700"
+    >
+      <p>{{ store.error }}</p>
+      <button
+        v-if="store.retryable"
+        type="button"
+        data-test="campaign-retry"
+        :disabled="store.generating"
+        class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
+        @click="store.retry()"
+      >
+        Tekrar dene
+      </button>
+    </div>
 
     <section v-if="store.campaign" class="space-y-4 rounded-lg border border-slate-200 bg-white p-6">
       <h2 class="text-sm font-medium text-slate-500">Hedef kitle</h2>
@@ -82,6 +110,34 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
         </div>
       </dl>
       <p class="text-xs text-slate-500">Sayılar yalnızca o kanal için izin vermiş alıcıları içerir.</p>
+
+      <RegenerateControl
+        part="segment"
+        placeholder="İsteğe bağlı talimat, ör. sadece Ankara"
+        :busy="store.segmentRegenerating"
+        :disabled="store.locked"
+        @regenerate="store.regenerateSegment($event)"
+      />
+      <div
+        v-if="store.segmentError"
+        data-test="segment-error"
+        class="flex flex-wrap items-center justify-between gap-3 rounded-md bg-red-50 p-3 text-sm text-red-700"
+      >
+        <p>{{ store.segmentError }}</p>
+        <button
+          v-if="store.segmentRetryable"
+          type="button"
+          data-test="segment-retry"
+          :disabled="store.locked"
+          class="rounded-md border border-red-300 bg-white px-3 py-1 font-medium text-red-700 hover:bg-red-100 disabled:opacity-40"
+          @click="store.retrySegment()"
+        >
+          Tekrar dene
+        </button>
+      </div>
     </section>
+
+    <ContentReview v-if="store.campaign" />
+    <ApprovalPanel v-if="store.campaign" />
   </div>
 </template>

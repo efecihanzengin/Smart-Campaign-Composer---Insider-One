@@ -6,3 +6,8 @@ Generating a proposal makes two Claude calls: a non-streamed tool call that prod
 
 - **One call returning Segment Rule and Content together**: fewer round trips, but the whole proposal must be regenerated to fix either part, and the Segment Rule would have to stream as partial JSON.
 - **Validate and fail without repair**: simpler, but turns recoverable model mistakes (an SMS 12 septets too long) into user-facing errors.
+
+## Notes from the real client
+
+- Current models (including the default `claude-sonnet-5-5`) reject a forced `tool_choice` (`tool` or `any`) with a 400. Both calls use `auto` and the system prompt asks for the tool; a response without the tool call, or one stopped by `max_tokens` or a refusal, is returned as an error, which the repair loop treats like any other failure.
+- The Content tool sets `eager_input_streaming`, so partial JSON reaches the screen as it is generated rather than in buffered bursts. The API then no longer validates the tool input, which costs nothing here: the backend validates it anyway.

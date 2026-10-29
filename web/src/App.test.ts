@@ -11,7 +11,14 @@ function mockOverview(body: unknown, status = 200) {
   return fetchMock
 }
 
+// jsdom has no EventSource; the dashboard's stream stays silent here.
+class SilentEventSource {
+  addEventListener() {}
+  close() {}
+}
+
 async function mountApp() {
+  vi.stubGlobal('EventSource', SilentEventSource)
   const wrapper = mount(App, { global: { plugins: [createPinia()] } })
   await flushPromises()
   return wrapper
