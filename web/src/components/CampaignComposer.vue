@@ -73,6 +73,15 @@ const formatCount = (n: number) => n.toLocaleString('tr-TR')
     <section v-if="store.campaign" class="space-y-4 rounded-lg border border-slate-200 bg-white p-6">
       <h2 class="text-sm font-medium text-slate-500">Hedef kitle</h2>
 
+      <p
+        v-if="store.campaign.mock_brief_unrecognised"
+        data-test="mock-brief-notice"
+        role="status"
+        class="rounded-md bg-sky-50 p-3 text-sm text-sky-800"
+      >
+        Mock LLM yalnızca örnek brief'i tanır; gerçek sonuç için ANTHROPIC_API_KEY girin.
+      </p>
+
       <div
         v-if="store.campaign.segment.unsupported_criteria.length"
         data-test="unsupported-warning"

@@ -190,6 +190,7 @@ func (s *server) regenerateSegment(w http.ResponseWriter, r *http.Request) {
 	}
 	out := regeneratedSegment{campaignView: campaignView{
 		ID: c.id, Status: c.status, Brief: c.brief, Repairs: repairs, Segment: newSegmentView(proposal),
+		MockBriefUnrecognised: s.mockBriefUnrecognised(c.brief),
 	}}
 	if out.Audience, err = segment.CountAudience(ctx, s.pool, proposal.Rule); err != nil {
 		sse.fail("count audience", err, saveFailed, true)

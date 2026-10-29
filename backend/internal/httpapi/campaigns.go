@@ -86,6 +86,15 @@ type campaignView struct {
 	// DisabledChannels explains each one that was turned off for that reason.
 	EnabledChannels  []string          `json:"enabled_channels"`
 	DisabledChannels map[string]string `json:"disabled_channels"`
+	// MockBriefUnrecognised is set when the mock LLM answered a Brief other
+	// than the example Brief it is scripted for, so its proposal is a guess.
+	MockBriefUnrecognised bool `json:"mock_brief_unrecognised"`
+}
+
+// mockBriefUnrecognised reports whether the mock LLM stands in for Claude and
+// brief is not the example Brief.
+func (s *server) mockBriefUnrecognised(brief string) bool {
+	return s.opts.MockLLM && !llm.IsExampleBrief(brief)
 }
 
 // campaignAudience counts a stored Campaign's Audience per Channel.
@@ -170,7 +179,8 @@ func (s *server) createCampaign(w http.ResponseWriter, r *http.Request) {
 		sse.fail("encode Segment Rule", err, saveFailed, true)
 		return
 	}
-	c := campaignView{Brief: brief, Repairs: repairs, Segment: newSegmentView(proposal)}
+	c := campaignView{Brief: brief, Repairs: repairs, Segment: newSegmentView(proposal),
+		MockBriefUnrecognised: s.mockBriefUnrecognised(brief)}
 	if c.Audience, err = segment.CountAudience(ctx, s.pool, proposal.Rule); err != nil {
 		sse.fail("count audience", err, saveFailed, true)
 		return

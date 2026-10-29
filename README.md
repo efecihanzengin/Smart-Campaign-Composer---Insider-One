@@ -23,6 +23,8 @@ On first start the API runs the migrations and seeds about 5,000 Recipients and 
 
 With the seed it gives the rule "Şehir: İstanbul · Son 30 günde sepete ekledi · Son 30 günde satın almadı", with an Audience of 387 Recipients for SMS and 514 for email after consent.
 
+Without an API key, use the example Brief: the mock LLM is scripted for it. Extra whitespace and typographic quotes (’ “ ”, or quotes around the whole Brief) do not matter. Any other Brief still gets a guessed proposal, but the UI then shows "Mock LLM yalnızca örnek brief'i tanır; gerçek sonuç için ANTHROPIC_API_KEY girin." Set `ANTHROPIC_API_KEY` in `.env` to have Claude read the Brief.
+
 If a port is taken, set `WEB_PORT`, `API_PORT` or `POSTGRES_PORT` in `.env`. All ports bind to 127.0.0.1. `.env.example` documents every variable, including the mock Provider's failure rates and the worker's retry, lease and rate-limit settings.
 
 ### Mock LLM vs real Claude

@@ -29,6 +29,9 @@ export interface Campaign {
   disabled_channels?: Partial<Record<Channel, string>>
   // repairs is how many repairs the Segment call needed (ADR-0005).
   repairs?: number
+  // mock_brief_unrecognised is set when the mock LLM answered a Brief other
+  // than the example Brief, so its proposal is only a guess.
+  mock_brief_unrecognised?: boolean
 }
 
 // ApiError carries the Marketer-facing message the API sent, if any, and

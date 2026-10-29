@@ -29,6 +29,7 @@ type campaign struct {
 		SMS   int `json:"sms"`
 		Email int `json:"email"`
 	} `json:"audience"`
+	MockBriefUnrecognised bool `json:"mock_brief_unrecognised"`
 }
 
 func postJSON(t *testing.T, url string, body, into any) int {
@@ -101,6 +102,23 @@ func scriptedSegment(raw string) *llm.Mock {
 	return &llm.Mock{SegmentFunc: func(context.Context, llm.SegmentRequest) (json.RawMessage, error) {
 		return json.RawMessage(raw), nil
 	}}
+}
+
+func TestMockFlagsABriefOtherThanTheExample(t *testing.T) {
+	srv := startAPI(t, httpapi.Options{MockLLM: true, LLM: llm.NewMock()})
+
+	pasted := "  \u201c" + strings.ReplaceAll(strings.ReplaceAll(exampleBrief, "'", "\u2019"), " ", "  ") + "\u201d\n"
+	if c := createCampaign(t, srv.URL, pasted); c.MockBriefUnrecognised {
+		t.Errorf("example Brief with other whitespace and quotes: mock_brief_unrecognised = true, want false")
+	}
+	if c := createCampaign(t, srv.URL, "Ankara'daki kullanıcılara yeni yıl kutlaması gönder."); !c.MockBriefUnrecognised {
+		t.Errorf("other Brief: mock_brief_unrecognised = false, want true")
+	}
+
+	real := startAPI(t, httpapi.Options{MockLLM: false, LLM: llm.NewMock()})
+	if c := createCampaign(t, real.URL, "Ankara'daki kullanıcılara yeni yıl kutlaması gönder."); c.MockBriefUnrecognised {
+		t.Errorf("real LLM: mock_brief_unrecognised = true, want false")
+	}
 }
 
 func TestExampleBriefYieldsSegmentRuleAndPerChannelAudience(t *testing.T) {

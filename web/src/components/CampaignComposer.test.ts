@@ -7,8 +7,9 @@ import { openStream, sse } from '../testing/sse'
 const exampleBrief =
   "Son 30 günde sepetine ürün ekleyip alışveriş yapmayan İstanbul'daki kullanıcılara %30 indirim hatırlatması gönder. Samimi ama kısa olsun."
 
-function campaign(overrides: { unsupported_criteria?: string[] } = {}) {
+function campaign(overrides: { unsupported_criteria?: string[]; mock_brief_unrecognised?: boolean } = {}) {
   return {
+    mock_brief_unrecognised: overrides.mock_brief_unrecognised ?? false,
     id: 1,
     status: 'draft',
     brief: exampleBrief,
@@ -101,6 +102,24 @@ describe('CampaignComposer', () => {
     const wrapper = await submitBrief()
 
     expect(wrapper.find('[data-test="unsupported-warning"]').exists()).toBe(false)
+  })
+
+  it('tells the Marketer when the mock LLM did not recognise the Brief', async () => {
+    mockCreate(campaign({ mock_brief_unrecognised: true }))
+
+    const wrapper = await submitBrief('Tüm kullanıcılara yeni yıl kutlaması gönder.')
+
+    expect(wrapper.get('[data-test="mock-brief-notice"]').text()).toBe(
+      "Mock LLM yalnızca örnek brief'i tanır; gerçek sonuç için ANTHROPIC_API_KEY girin.",
+    )
+  })
+
+  it('shows no mock notice for the example Brief', async () => {
+    mockCreate(campaign())
+
+    const wrapper = await submitBrief()
+
+    expect(wrapper.find('[data-test="mock-brief-notice"]').exists()).toBe(false)
   })
 
   it('shows the API error when generation fails', async () => {

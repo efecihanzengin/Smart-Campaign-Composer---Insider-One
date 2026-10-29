@@ -320,8 +320,28 @@ export const useCampaignStore = defineStore('campaign', {
       this.lastSegmentInstruction = instruction
       try {
         const r = await regenerateSegment(this.campaign.id, instruction, (n) => (this.segmentRepairing = n))
-        const { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels } = r
-        this.campaign = { id, status, brief, segment, audience, repairs, enabled_channels, disabled_channels }
+        const {
+          id,
+          status,
+          brief,
+          segment,
+          audience,
+          repairs,
+          enabled_channels,
+          disabled_channels,
+          mock_brief_unrecognised,
+        } = r
+        this.campaign = {
+          id,
+          status,
+          brief,
+          segment,
+          audience,
+          repairs,
+          enabled_channels,
+          disabled_channels,
+          mock_brief_unrecognised,
+        }
         // Validation answers for the old Audience must not overwrite these.
         for (const c of channels) this.revisions[c]++
         this.validation = r.validation
