@@ -67,7 +67,7 @@ web (Vue 3, nginx) ──/api──▶ api (Go) ──▶ Claude / mock LLM
 
 ## Not done and known limitations
 
-- **The real model was not exercised during development.** No API key was available. The Claude client is tested only against a fake of the Messages API, so the prompt wording (including regeneration and repair) and the latency with the real model have not been verified. Sonnet thinks adaptively, so expect a pause before the first streamed token.
+- **The real model is checked by hand, not by the tests.** On 29 October 2026 the real Claude client was run manually with the example Brief and with a Brief containing an unsupported criterion (product category). Both gave a correct Segment Rule and Content. That Campaign was approved and sent, with the worker stopped and restarted mid-send: 1220 Deliveries, exactly 1220 accepted Attempts, zero duplicates. Regeneration and repair prompts were not part of that run. `make test` still uses a fake of the Messages API, so it needs no key. Sonnet thinks adaptively, so expect a pause before the first streamed token.
 - **The mock LLM's Content is scripted.** It is valid and in Turkish, but generic. For example, a Brief that only names a city still gets cart-reminder Content.
 - **The rate limit is per worker process.** Running several workers multiplies the 100/s. A distributed limiter was out of scope.
 - **The Provider can accept a Delivery that is marked `failed`.** If the last allowed Attempt times out after the Provider accepted it, the Delivery is marked failed. Nothing is duplicated, but the dashboard under-reports sent messages.
